@@ -60,3 +60,28 @@ Set `CURRATOR_MODE=mock` for the offline text backup. See [demo acceptance](docs
 ## Hardware integration
 
 The simulator exercises the same command rules with mock sensors and transport. Keep `ENABLE_MOTION=false` on the demo machine until the hardware team confirms the interface and passes the physical acceptance checks. The starter serial writer is a prototype. See the [hardware contract](docs/HARDWARE_CONTRACT.md) for the settings and handoff checklist.
+
+## How the complete robot fits together
+
+The operator opens the console in a browser on the laptop or Raspberry Pi running Currator.
+A connected robot display can show that same console. The screen offers a language selector,
+microphone, transcript, replies, and source links. The local Python server handles the provider
+requests. A public website and web hosting are unnecessary for this setup.
+
+For a voice turn, the microphone sends a recording to the local server. Pindo transcribes
+Kinyarwanda. English uses the configured local Vosk model or Gemini. Gemini prepares the
+open-ended reply and the app can retrieve Wikimedia evidence for general factual questions.
+The console displays the answer and plays Pindo's Kinyarwanda audio or the browser's English
+voice. The live providers need internet access.
+
+On the proposed hardware setup, one USB data cable connects the computer to the ESP32.
+The operator's movement controls use a separate channel from conversation. The ESP32 runs the
+motor and sensor firmware. Currator's USB bench check verifies incoming sensor messages.
+Continuous sensor integration, firmware acknowledgements, and physical motion verification
+are required before the hardware demo.
+
+Check source access on the presentation network without a Gemini key or a running server.
+
+```bash
+python -m currator.smoke --source-query "Kigali" --language en --expect Rwanda
+```

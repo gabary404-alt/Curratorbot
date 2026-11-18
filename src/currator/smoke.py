@@ -1,7 +1,8 @@
-"""Run a timed speech check through a running Currator server."""
+"""Check Currator speech or Wikimedia lookup from the demo computer."""
 from __future__ import annotations
 
 import argparse
+import asyncio
 import io
 import mimetypes
 import time
@@ -10,6 +11,8 @@ from pathlib import Path
 
 import httpx
 
+from .config import Settings
+from .knowledge import look_up
 from .speech import safe_audio_url
 
 SAMPLE_TEXT = "Muraho neza!"
@@ -100,6 +103,20 @@ def run(args: argparse.Namespace) -> None:
             print("English playback can be checked on the browser's speaker.")
 
 
+async def check_sources(query: str, language: str, expected: str | None) -> None:
+    started = time.perf_counter()
+    async with httpx.AsyncClient() as client:
+        evidence, sources = await look_up(query, language, client, Settings().wikimedia_user_agent)
+    print(f"Wikimedia lookup ({time.perf_counter() - started:.2f}s)")
+    for source in sources:
+        print(f"{source.label} — {source.url}")
+    if not evidence or not sources:
+        raise ValueError("No Wikimedia evidence was returned")
+    if expected and expected.casefold() not in evidence.casefold():
+        raise ValueError(f"Source excerpts did not include {expected!r}")
+    print(evidence)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
@@ -107,7 +124,14 @@ def main() -> int:
     parser.add_argument("--audio", type=Path, help="Use a local recording instead of a generated clip")
     parser.add_argument("--expect", help="Require this text in the transcript (case-insensitive)")
     parser.add_argument("--output", type=Path, help="Save the Kinyarwanda WAV reply to a new file")
+    parser.add_argument("--source-query", help="Look up Wikimedia sources without starting the server")
     args = parser.parse_args()
+    if args.source_query:
+        try:
+            asyncio.run(check_sources(args.source_query, args.language, args.expect))
+        except (ValueError, httpx.HTTPError, ImportError) as error:
+            parser.exit(1, f"Source check failed: {error}\n")
+        return 0
     try:
         run(args)
     except (ValueError, OSError, EOFError, wave.Error, httpx.HTTPError) as error:

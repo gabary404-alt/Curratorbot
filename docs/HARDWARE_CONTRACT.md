@@ -48,3 +48,14 @@ Only then set `ENABLE_MOTION=true` **and** a random `ROBOT_OPERATOR_TOKEN` (>=24
 ## ROS 2 decision
 
 ROS 2 Jazzy on Ubuntu 24.04 ARM64 is appropriate if the hardware team already has a ROS 2 sensor/drive stack. **Do not add ROS 2 solely for the demo**; direct USB serial is simpler and leaves more time for test and rehearsal.
+
+## First USB bench check
+
+With the motor drive disconnected and the controller firmware publishing telemetry, install the
+serial extra with `python -m pip install -e '.[serial]'`. Connect the USB data cable, find the
+port with `python -m serial.tools.list_ports`, then run `python -m currator.usb_check COM3`.
+Replace `COM3` with the port shown on your machine. Close other serial monitors first.
+
+The check listens for three valid sensor frames. It sends no motion commands. Its result confirms
+the computer can read sensor messages. Emergency-stop behavior and command acknowledgements
+require separate firmware and bench verification.
