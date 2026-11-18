@@ -108,3 +108,42 @@ def test_current_answer_requires_sources(monkeypatch):
 def test_now_matches_word_boundaries():
     assert main.needs_current_info("What is happening now?")
     assert not main.needs_current_info("What do you know about robots?")
+
+
+@pytest.mark.asyncio
+async def test_wikimedia_prefers_requested_language_and_keeps_sources():
+    from currator.knowledge import look_up
+
+    def handler(request):
+        if request.url.host == "www.wikidata.org":
+            return httpx.Response(200, json={"search": [{
+                "id": "Q3859", "label": "Kigali", "description": "Capital city",
+            }]})
+        assert request.url.params["generator"] == "search"
+        return httpx.Response(200, json={"query": {"pages": {"1": {
+            "title": "Kigali", "extract": request.url.host,
+        }}}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        context, sources = await look_up("Kigali", "rw", client, "CurratorBot test")
+    assert "rw.wikipedia.org" in context
+    assert "en.wikipedia.org" not in context
+    assert [source.url for source in sources] == [
+        "https://rw.wikipedia.org/wiki/Kigali", "https://www.wikidata.org/wiki/Q3859",
+    ]
+
+
+def test_rehearsal_reuses_generated_speech(rehearsal, monkeypatch):
+    calls = []
+
+    async def speak(self, text):
+        calls.append(text)
+        return "https://api.pindo.io/example.wav"
+
+    monkeypatch.setattr(main.PindoSpeech, "speak", speak)
+    payload = {"text": main.REPLIES["rw"]["hello"], "language": "rw"}
+    first = rehearsal.post("/api/speech/synthesize", json=payload)
+    second = rehearsal.post("/api/speech/synthesize", json=payload)
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    assert calls == [payload["text"]]

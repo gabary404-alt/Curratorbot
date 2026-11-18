@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -19,7 +21,7 @@ from .english import LocalEnglishSpeech
 from .knowledge import look_up, needs_current_info, needs_wikipedia
 from .models import (ChatRequest, ChatResponse, Language, RobotCommand, RobotResult,
                      SensorTelemetry, TranscriptionResponse)
-from .rehearsal import rehearsal_reply
+from .rehearsal import REPLIES, rehearsal_reply
 from .robot import RobotBridge
 from .speech import PindoSpeech, UpstreamFailure, transcribe_english_gemini
 
@@ -33,6 +35,7 @@ async def lifespan(app: FastAPI):
         app.state.client = client
         app.state.robot = RobotBridge(settings)
         app.state.sessions = {}
+        app.state.speech_cache = OrderedDict()
         app.state.english = (
             await asyncio.to_thread(LocalEnglishSpeech, settings.vosk_model_path)
             if settings.vosk_model_path and settings.mode != "mock"
@@ -87,6 +90,12 @@ async def chat(request: ChatRequest):
             request.text, request.language, app.state.client,
             settings.wikimedia_user_agent,
         )
+    if request.retrieval == "on" and wikipedia and not sources:
+        reply = (
+            "Sinabonye isoko ryizewe kuri iki kibazo."
+            if request.language == "rw" else "I couldn't find a source for that."
+        )
+        return ChatResponse(reply=reply, language=request.language, source_mode="source_unavailable")
     brain = GeminiBrain(settings, app.state.client)
     try:
         if uses_search and not settings.google_search_grounding:
@@ -173,6 +182,11 @@ async def synthesize(request: SpeakRequest):
     if request.language == "en":
         # English speech uses the browser's local speechSynthesis in prototype.
         return {"audio_url": None, "provider": "browser-english", "simulated": False}
+    cache = app.state.speech_cache
+    cached = cache.get(request.text)
+    if cached and cached[1] > time.monotonic():
+        cache.move_to_end(request.text)
+        return {"audio_url": cached[0], "provider": "pindo", "simulated": False}
     try:
         link = await PindoSpeech(settings, app.state.client).speak(request.text)
         if not link:
@@ -180,6 +194,12 @@ async def synthesize(request: SpeakRequest):
                 status_code=502,
                 detail="Pindo returned a missing or unsupported audio URL",
             )
+        # Only cache unsigned media URLs and keep the cache in memory.
+        if settings.mode == "rehearsal" and request.text in REPLIES["rw"].values() and "?" not in link:
+            cache[request.text] = (link, time.monotonic() + 300)
+            cache.move_to_end(request.text)
+            if len(cache) > 64:
+                cache.popitem(last=False)
         return {"audio_url": link, "provider": "pindo", "simulated": False}
     except UpstreamFailure as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
