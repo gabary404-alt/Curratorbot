@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+*.wav
+*.mp3
+*.webm
+*.ogg
+*.sqlite3
+.DS_Store
