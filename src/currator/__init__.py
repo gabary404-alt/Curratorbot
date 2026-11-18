@@ -1,0 +1,1 @@
+"""Currator Bot application."""
