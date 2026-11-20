@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import quote, urlsplit
 from xml.etree import ElementTree
 
@@ -141,14 +143,23 @@ async def news_lookup(query: str, client: httpx.AsyncClient):
         except ElementTree.ParseError:
             return "", []
         evidence, sources = [], []
-        for item in root.findall("./channel/item")[:4]:
+        now = datetime.now(timezone.utc)
+        for item in root.findall("./channel/item"):
             url = item.findtext("link", "")
             title = item.findtext("title", "").strip()
             if not title or not url.startswith("https://news.google.com/rss/articles/"):
                 continue
             date = item.findtext("pubDate", "")[:40]
+            try:
+                published = parsedate_to_datetime(date)
+            except (ValueError, OverflowError):
+                continue
+            if published.tzinfo is None or not now - timedelta(days=7) <= published <= now:
+                continue
             evidence.append(f"Headline published {date}: {title[:220]}")
             sources.append(Source(label=title[:160], url=url))
+            if len(sources) == 4:
+                break
         return "\n".join(evidence), sources
 
     reports = await asyncio.gather(_bounded_lookup(fetch()), _bounded_lookup(google_news()))
