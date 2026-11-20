@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from urllib.parse import quote
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
+from xml.etree import ElementTree
 
 import httpx
 
@@ -123,7 +123,36 @@ async def news_lookup(query: str, client: httpx.AsyncClient):
             sources.append(Source(label=f"{parsed.hostname}: {title[:140]}", url=url))
         return "\n".join(evidence), sources
 
-    return await _bounded_lookup(fetch()) or ("", [])
+    async def google_news():
+        async with client.stream(
+            "GET", "https://news.google.com/rss/search",
+            params={"q": f"{' '.join(keywords[:5]) or 'Rwanda'} when:7d",
+                    "hl": "en", "gl": "RW", "ceid": "RW:en"},
+            follow_redirects=True,
+        ) as response:
+            response.raise_for_status()
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > 256_000:
+                    return "", []
+        try:
+            root = ElementTree.fromstring(body)
+        except ElementTree.ParseError:
+            return "", []
+        evidence, sources = [], []
+        for item in root.findall("./channel/item")[:4]:
+            url = item.findtext("link", "")
+            title = item.findtext("title", "").strip()
+            if not title or not url.startswith("https://news.google.com/rss/articles/"):
+                continue
+            date = item.findtext("pubDate", "")[:40]
+            evidence.append(f"Headline published {date}: {title[:220]}")
+            sources.append(Source(label=title[:160], url=url))
+        return "\n".join(evidence), sources
+
+    reports = await asyncio.gather(_bounded_lookup(fetch()), _bounded_lookup(google_news()))
+    return next((report for report in reports if report and report[1]), ("", []))
 
 
 def needs_wikipedia(text: str) -> bool:
