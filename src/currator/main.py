@@ -12,13 +12,14 @@ from typing import Annotated
 import httpx
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, StringConstraints
 
 from .brain import GeminiBrain, mock_reply
-from .config import Settings
+from .config import HOSTED, Settings
 from .english import LocalEnglishSpeech
-from .knowledge import look_up, needs_current_info, needs_wikipedia
+from .knowledge import look_up, needs_current_info, needs_wikipedia, news_lookup
 from .models import (ChatRequest, ChatResponse, Language, RobotCommand, RobotResult,
                      SensorTelemetry, TranscriptionResponse)
 from .rehearsal import REPLIES, rehearsal_reply
@@ -41,10 +42,32 @@ async def lifespan(app: FastAPI):
             if settings.vosk_model_path and settings.mode != "mock"
             else None
         )
-        yield
+        receiver = (
+            asyncio.create_task(app.state.robot.receive_serial())
+            if settings.robot_transport == "serial" else None
+        )
+        try:
+            yield
+        finally:
+            if receiver is not None:
+                receiver.cancel()
+                await asyncio.gather(receiver, return_exceptions=True)
 
 
-app = FastAPI(title="Currator Bot API", version="0.1.0", lifespan=lifespan)
+def require_demo_access(credentials: HTTPBasicCredentials | None = Depends(HTTPBasic(auto_error=False))):
+    if not HOSTED or settings.mode != "live":
+        return
+    if credentials is None or not secrets.compare_digest(
+        credentials.password.encode(), settings.demo_password.encode()
+    ):
+        raise HTTPException(
+            status_code=401, detail="Demo password required",
+            headers={"WWW-Authenticate": 'Basic realm="Currator Bot"'},
+        )
+
+
+app = FastAPI(title="Currator Bot API", version="0.1.0", lifespan=lifespan,
+              dependencies=[Depends(require_demo_access)])
 
 
 def speech_input_languages() -> list[Language]:
@@ -60,7 +83,7 @@ async def status():
         "voice_live": settings.mode != "mock",
         "speech_input": speech_input_languages(),
         "speech_output": [] if settings.mode == "mock" else ["rw", "en"],
-        "motion_enabled": settings.enable_motion,
+        "motion_enabled": settings.enable_motion, "hosted": HOSTED,
         "robot_transport": settings.robot_transport,
         "note": "Health report shows configuration, not verified upstream availability",
     }
@@ -72,25 +95,49 @@ async def chat(request: ChatRequest):
         return ChatResponse(reply=mock_reply(request.text, request.language),
                             language=request.language, simulated=True)
     if settings.mode == "rehearsal":
+        if request.retrieval == "on":
+            current = needs_current_info(request.text)
+            if current:
+                evidence, sources = await news_lookup(request.text, app.state.client)
+            else:
+                evidence, sources = await look_up(
+                    request.text, request.language, app.state.client, settings.wikimedia_user_agent,
+                )
+            return ChatResponse(
+                reply=(
+                    "Reba amasoko akurikira." if request.language == "rw" else
+                    "I found these sources. Live AI can use them to answer your question."
+                ) if evidence else (
+                    "Sinabonye isoko kuri iki kibazo." if request.language == "rw" else
+                    "I couldn't find a source for that. Try a shorter topic such as Kigali."
+                ),
+                language=request.language, sources=sources,
+                source_mode="news" if current else "wikipedia",
+            )
         return ChatResponse(
             reply=rehearsal_reply(request.text, request.language),
             language=request.language, source_mode="rehearsal", simulated=True,
         )
     # In-memory recent history for MVP; no personal recordings stored.
     sessions: dict = app.state.sessions
-    history = sessions.get(request.session_id, [])
+    history = (
+        [turn.model_dump() for turn in request.history]
+        if request.history is not None else ([] if HOSTED else sessions.get(request.session_id, []))
+    )
     uses_search = request.retrieval != "off" and needs_current_info(request.text)
     wikipedia = not uses_search and (
         request.retrieval == "on"
         or (request.retrieval == "auto" and needs_wikipedia(request.text))
     )
     extra_info, sources = "", []
-    if wikipedia:
+    if uses_search and not settings.google_search_grounding:
+        extra_info, sources = await news_lookup(request.text, app.state.client)
+    elif wikipedia:
         extra_info, sources = await look_up(
             request.text, request.language, app.state.client,
             settings.wikimedia_user_agent,
         )
-    if request.retrieval == "on" and wikipedia and not sources:
+    if request.retrieval == "on" and wikipedia and not sources and not settings.google_search_grounding:
         reply = (
             "Sinabonye isoko ryizewe kuri iki kibazo."
             if request.language == "rw" else "I couldn't find a source for that."
@@ -98,12 +145,13 @@ async def chat(request: ChatRequest):
         return ChatResponse(reply=reply, language=request.language, source_mode="source_unavailable")
     brain = GeminiBrain(settings, app.state.client)
     try:
-        if uses_search and not settings.google_search_grounding:
-            raise UpstreamFailure("Google Search grounding is disabled")
+        use_google = settings.google_search_grounding and (uses_search or (wikipedia and not sources))
+        if uses_search and not (use_google or sources):
+            raise UpstreamFailure("No current sources available")
         reply, search_sources = await brain.answer(
-            request.text, request.language, history, extra_info, use_google=uses_search
+            request.text, request.language, history, extra_info, use_google=use_google
         )
-        if uses_search and not search_sources:
+        if use_google and not search_sources:
             raise UpstreamFailure("Gemini returned no grounded sources")
     except UpstreamFailure as exc:
         # Do not silently fall back to an ungrounded answer for a live-info question.
@@ -115,16 +163,17 @@ async def chat(request: ChatRequest):
                                 source_mode="live_unavailable")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     # Store bounded session history without permanent persistence.
-    sessions[request.session_id] = (
-        history + [{"role": "user", "text": request.text},
-                   {"role": "model", "text": reply}]
-    )[-8:]
-    if len(sessions) > 100:
-        sessions.pop(next(iter(sessions)))
+    if request.history is None and not HOSTED:
+        sessions[request.session_id] = (
+            history + [{"role": "user", "text": request.text},
+                       {"role": "model", "text": reply}]
+        )[-8:]
+        if len(sessions) > 100:
+            sessions.pop(next(iter(sessions)))
     all_sources = (search_sources or sources)[:4]
     return ChatResponse(reply=reply, language=request.language,
                         source_mode="google" if search_sources else
-                        "wikipedia" if sources else "none",
+                        ("news" if uses_search else "wikipedia") if sources else "none",
                         sources=all_sources)
 
 
@@ -132,7 +181,7 @@ ALLOWED_MIMES = {
     "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3", "audio/webm",
     "audio/ogg", "audio/flac", "audio/mp4", "audio/x-m4a", "audio/m4a",
 }
-MAX_AUDIO_SIZE = 9 * 1024 * 1024
+MAX_AUDIO_SIZE = (4 if HOSTED else 9) * 1024 * 1024
 
 
 @app.post("/api/speech/transcribe", response_model=TranscriptionResponse)
@@ -206,14 +255,31 @@ async def synthesize(request: SpeakRequest):
 
 
 def require_operator(x_operator_token: str = Header(default="")):
-    if not settings.robot_operator_token or not secrets.compare_digest(
-        x_operator_token, settings.robot_operator_token
+    if HOSTED or not settings.robot_operator_token or not secrets.compare_digest(
+        x_operator_token.encode(), settings.robot_operator_token.encode()
     ):
         raise HTTPException(status_code=401, detail="Operator token required")
 
 
+@app.get("/api/robot/status", dependencies=[Depends(require_operator)])
+async def robot_status():
+    robot = app.state.robot
+    telemetry = robot.telemetry
+    age = time.monotonic() - telemetry.received_at if telemetry.value else None
+    return {
+        "transport": settings.robot_transport,
+        "motion_enabled": settings.enable_motion,
+        "usb_connected": robot.port is not None,
+        "telemetry_fresh": age is not None and age <= 1.5,
+        "telemetry": telemetry.value,
+        "stop_confirmation_required": robot.motion_uncertain,
+    }
+
+
 @app.post("/api/robot/telemetry", dependencies=[Depends(require_operator)])
 async def robot_telemetry(telemetry: SensorTelemetry):
+    if settings.robot_transport == "serial":
+        raise HTTPException(status_code=409, detail="Serial mode accepts controller telemetry only")
     app.state.robot.update_telemetry(telemetry)
     return {"accepted": True, "note": "Telemetry accepted; firmware must enforce safety"}
 
@@ -226,7 +292,8 @@ async def robot_command(command: RobotCommand):
         return RobotResult(accepted=True, action=actual["cmd"],
                            transport=settings.robot_transport,
                            simulated=settings.robot_transport == "mock",
-                           reason="Command dispatched, not proof of motor execution")
+                           reason="Controller acknowledged command" if settings.robot_transport == "serial"
+                           else "Simulated command dispatched")
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except (RuntimeError, OSError) as exc:

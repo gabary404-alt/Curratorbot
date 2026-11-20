@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 from urllib.parse import quote
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -85,6 +86,44 @@ def needs_current_info(text: str) -> bool:
         "minisitiri w'intebe", "minisitiri w’intebe", "ikiguzi",
     )
     return matches_phrase(text, triggers)
+
+
+async def news_lookup(query: str, client: httpx.AsyncClient):
+    """Search recent global news coverage. Evidence is limited to headlines."""
+    terms = re.findall(r"[^\W_]+", query.casefold())[:30]
+    ignored = set(
+        "what who is are was were the a an in on of about for me tell please "
+        "current latest today now news this week updates give you can happening "
+        "amakuru mashya agezweho uyu munsi ubu ni iki nde mu i kuri kuriya "
+        "mbwira amakuru ibibera ibishya".split()
+    )
+    keywords = list(dict.fromkeys(word for word in terms if len(word) > 1 and word not in ignored))
+    search = " ".join(f'"{word}"' for word in keywords[:5]) or "Rwanda"
+
+    async def fetch():
+        response = await client.get(
+            "https://api.gdeltproject.org/api/v2/doc/doc",
+            params={"query": search, "mode": "artlist", "format": "json",
+                    "timespan": "7d", "maxrecords": 4, "sort": "hybridrel"},
+        )
+        response.raise_for_status()
+        evidence, sources = [], []
+        for article in response.json().get("articles", [])[:4]:
+            title, url = article.get("title"), article.get("url")
+            if not isinstance(title, str) or not isinstance(url, str):
+                continue
+            parsed = urlsplit(url)
+            if not title.strip() or parsed.scheme != "https" or not parsed.hostname or url in {
+                source.url for source in sources
+            }:
+                continue
+            seen = article.get("seendate", "")
+            date = seen[:8] if isinstance(seen, str) else ""
+            evidence.append(f"Headline indexed {date}: {title[:220]}")
+            sources.append(Source(label=f"{parsed.hostname}: {title[:140]}", url=url))
+        return "\n".join(evidence), sources
+
+    return await _bounded_lookup(fetch()) or ("", [])
 
 
 def needs_wikipedia(text: str) -> bool:

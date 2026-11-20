@@ -15,6 +15,7 @@ let config = null;
 let phase = 'idle';
 let recording = null;
 let speech = null;
+const history = [];
 
 function bubble(text, kind = 'bot', lang) {
   const entry = document.createElement('div');
@@ -32,7 +33,7 @@ function setPhase(next, message) {
   const active = phase === 'recording';
   $('send').disabled = !config || !idle;
   language.disabled = !idle;
-  $('retrieval').disabled = !idle || config?.mode !== 'live';
+  $('retrieval').disabled = !idle || !config || config.mode === 'mock';
   record.disabled = !active && (
     !idle || !config?.speech_input.includes(language.value) ||
     !navigator.mediaDevices?.getUserMedia || !window.MediaRecorder
@@ -75,7 +76,7 @@ async function loadStatus() {
     config = await api('/api/status');
     const [title, notice] = modes[config.mode];
     $('status').textContent = title;
-    $('mode-warning').textContent = notice;
+    $('mode-warning').textContent = [notice, config.hosted ? 'Browser demo. Robot controls run on the robot computer.' : ''].filter(Boolean).join(' ');
     setPhase('idle');
     hint.textContent = readyMessage();
   } catch {
@@ -204,8 +205,12 @@ async function ask(text, lang) {
   setPhase('thinking', 'Thinking…');
   try {
     const result = await post('/api/chat', {
-      text, language: lang, session_id: sessionId, retrieval: $('retrieval').value,
+      text, language: lang, session_id: sessionId, retrieval: $('retrieval').value, history,
     });
+    if (config.mode === 'live' && !['live_unavailable', 'source_unavailable'].includes(result.source_mode)) {
+      history.push({role: 'user', text}, {role: 'model', text: result.reply.slice(0, 1500)});
+      if (history.length > 6) history.splice(0, 2);
+    }
     const response = bubble(result.reply, 'bot', lang);
     if (result.simulated) {
       const notice = document.createElement('small');

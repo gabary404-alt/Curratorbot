@@ -9,11 +9,17 @@ Language = Literal["rw", "en"]
 ChatText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1500)]
 
 
+class ChatTurn(BaseModel):
+    role: Literal["user", "model"]
+    text: ChatText
+
+
 class ChatRequest(BaseModel):
     text: ChatText
     language: Language = "rw"
     session_id: str = Field(default="demo", pattern=r"^[\w-]{1,64}$")
     retrieval: Literal["auto", "on", "off"] = "auto"
+    history: list[ChatTurn] | None = Field(default=None, max_length=6)
 
 
 class Source(BaseModel):

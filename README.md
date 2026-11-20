@@ -44,6 +44,16 @@ Create a free-tier [Google AI Studio API key](https://aistudio.google.com/apikey
 
 The default `gemini-3.1-flash-lite` supports [audio input](https://aistudio.google.com/docs/models/gemini-3.1-flash-lite) and has [free text and audio usage within quota](https://aistudio.google.com/docs/pricing#gemini-3.1-flash-lite). Google Search grounding is disabled for the demo configuration. For current questions, Currator reports when it cannot verify live information. Wikipedia and Wikidata can provide sources for general questions. Free public providers may retain or process requests under their own terms. Use rehearsed questions and avoid personal information in public demos.
 
+Recent news questions can also use GDELT to retrieve and cite publisher headlines from the
+past week. Headlines do not substitute for exact weather, live prices, or full article text.
+
+### Vercel browser demo
+
+Add `GEMINI_API_KEY` and `CURRATOR_DEMO_PASSWORD` (a separate password of at least 16 characters)
+as sensitive Production variables in Vercel, then redeploy. Sign in with username `currator`
+and the demo password. Without both values the site defaults to rehearsal mode, where Research
+can show source links and the other modes use prepared replies. Keep hardware on the local server.
+
 ## Verify before rehearsal
 
 ```bash
@@ -59,7 +69,11 @@ Set `CURRATOR_MODE=mock` for the offline text backup. See [demo acceptance](docs
 
 ## Hardware integration
 
-The simulator exercises the same command rules with mock sensors and transport. Keep `ENABLE_MOTION=false` on the demo machine until the hardware team confirms the interface and passes the physical acceptance checks. The starter serial writer is a prototype. See the [hardware contract](docs/HARDWARE_CONTRACT.md) for the settings and handoff checklist.
+The simulator exercises the same command rules with mock sensors and transport. On the local
+server, install `.[serial]`, configure the USB port, and set an operator token. With motion
+disabled, run `python -m currator.operator status` to check live sensor readings and
+`python -m currator.operator stop` to check an acknowledgement. See the
+[hardware contract](docs/HARDWARE_CONTRACT.md) for the firmware handoff and acceptance checks.
 
 ## How the complete robot fits together
 
@@ -77,8 +91,8 @@ voice. The live providers need internet access.
 On the proposed hardware setup, one USB data cable connects the computer to the ESP32.
 The operator's movement controls use a separate channel from conversation. The ESP32 runs the
 motor and sensor firmware. Currator's USB bench check verifies incoming sensor messages.
-Continuous sensor integration, firmware acknowledgements, and physical motion verification
-are required before the hardware demo.
+The local app reads streaming telemetry and checks firmware acknowledgements. The hardware
+team must implement the agreed wire format and pass physical motion verification before the demo.
 
 Check source access on the presentation network without a Gemini key or a running server.
 
