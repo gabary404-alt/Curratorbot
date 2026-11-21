@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
+import wave
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -18,6 +20,45 @@ ALLOWED_MEDIA_HOSTS = {
 
 class UpstreamFailure(RuntimeError):
     pass
+
+
+async def casual_english_audio(text: str, settings: Settings, client: httpx.AsyncClient) -> str | None:
+    """Use the existing Gemini key for an expressive English voice, with a short timeout."""
+    try:
+        response = await client.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-2.5-flash-preview-tts:generateContent",
+            headers={"x-goog-api-key": settings.gemini_api_key},
+            json={
+                "contents": [{"parts": [{"text": (
+                    "Read only the quoted passage. Sound like a relaxed, upbeat teammate "
+                    "speaking to one visitor, with light warmth and natural pauses.\n"
+                    f"Passage:\n{text}"
+                )}]}],
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {"voiceConfig": {
+                        "prebuiltVoiceConfig": {"voiceName": "Zubenelgenubi"},
+                    }},
+                },
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        parts = response.json()["candidates"][0]["content"]["parts"]
+        raw = next(part["inlineData"]["data"] for part in parts if "inlineData" in part)
+        if len(raw) > 3_200_000:
+            return None
+        pcm = base64.b64decode(raw, validate=True)
+        if not pcm or len(pcm) % 2:
+            return None
+        output = io.BytesIO()
+        with wave.open(output, "wb") as wav:
+            wav.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            wav.writeframes(pcm)
+        return "data:audio/wav;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+    except (httpx.HTTPError, KeyError, IndexError, StopIteration, TypeError, ValueError):
+        return None
 
 
 def _read_data(payload: object) -> dict:
@@ -120,7 +161,7 @@ class PindoSpeech:
 
 
 async def transcribe_english_gemini(
-    raw: bytes, mime: str, settings: Settings, client: httpx.AsyncClient
+    raw: bytes, mime: str, settings: Settings, client: httpx.AsyncClient, *, automatic: bool = False,
 ) -> str:
     """English ASR with Gemini's audio input; validated independently in live mode."""
     if not settings.gemini_api_key:
@@ -132,7 +173,12 @@ async def transcribe_english_gemini(
     )
     body = {
         "contents": [{"parts": [
-            {"text": "Transcribe this English speech verbatim. Return ONLY the transcript."},
+            {"text": (
+                "Transcribe this speech verbatim in its original languages, including "
+                "Kinyarwanda and language switches. Do not translate or answer the speaker. "
+                "Return only the transcript, or empty text if there is no intelligible speech."
+                if automatic else "Transcribe this English speech verbatim. Return ONLY the transcript."
+            )},
             {"inline_data": {"mime_type": mime, "data": audio}},
         ]}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 350},
@@ -147,4 +193,4 @@ async def transcribe_english_gemini(
         parts = candidates[0]["content"]["parts"] if candidates else []
         return " ".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
     except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
-        raise UpstreamFailure("English speech recognition unavailable") from exc
+        raise UpstreamFailure("Speech recognition unavailable") from exc

@@ -74,6 +74,7 @@ function post(path, body, signal) {
 async function loadStatus() {
   try {
     config = await api('/api/status');
+    if (!config.speech_input.includes('auto') && language.value === 'auto') language.value = 'rw';
     const [title, notice] = modes[config.mode];
     $('status').textContent = title;
     $('mode-warning').textContent = [notice, config.hosted ? 'Browser demo. Robot controls run on the robot computer.' : ''].filter(Boolean).join(' ');
@@ -133,9 +134,19 @@ async function speak(text, lang, entry, audioUrl = null) {
   };
 
   try {
-    if (lang === 'en') {
+    if (!audioUrl && (lang !== 'en' || config.mode === 'live')) {
+      hint.textContent = 'Preparing voice…';
+      const data = await post('/api/speech/synthesize', {
+        text: Array.from(text).slice(0, 800).join(''),
+        language: lang,
+      }, active.controller.signal);
+      if (speech !== active) return;
+      audioUrl = data.audio_url;
+    }
+    if (!audioUrl && lang === 'en') {
       if (!('speechSynthesis' in window)) throw new Error('English speech unavailable on this device.');
-      const voice = window.speechSynthesis.getVoices().find(item => item.lang.startsWith('en'));
+      const voices = window.speechSynthesis.getVoices().filter(item => item.lang.startsWith('en'));
+      const voice = voices.find(item => /natural|neural|premium/i.test(item.name)) || voices[0];
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = 'en-US';
       utterance.rate = .98;
@@ -150,22 +161,13 @@ async function speak(text, lang, entry, audioUrl = null) {
       window.speechSynthesis.speak(utterance);
       return;
     }
-    if (!audioUrl) {
-      hint.textContent = 'Preparing Pindo speech…';
-      const data = await post('/api/speech/synthesize', {
-        text: Array.from(text).slice(0, 800).join(''),
-        language: lang,
-      }, active.controller.signal);
-      if (speech !== active) return;
-      audioUrl = data.audio_url;
-    }
     active.player = new Audio(audioUrl);
     active.player.onplaying = started;
     active.player.onended = () => finish();
     active.player.onerror = () => {
       if (speech !== active) return;
       appendPlayButton(entry, 'Try speech again', () => void speak(text, lang, entry));
-      finish('The Pindo audio file could not play.');
+      finish('The reply audio could not play.');
     };
     await active.player.play();
   } catch (error) {
@@ -201,7 +203,7 @@ function appendSources(sources) {
 
 async function ask(text, lang) {
   stopSpeech();
-  bubble(text, 'user', lang);
+  bubble(text, 'user', lang === 'auto' ? undefined : lang);
   setPhase('thinking', 'Thinking…');
   try {
     const result = await post('/api/chat', {
@@ -211,7 +213,8 @@ async function ask(text, lang) {
       history.push({role: 'user', text}, {role: 'model', text: result.reply.slice(0, 1500)});
       if (history.length > 6) history.splice(0, 2);
     }
-    const response = bubble(result.reply, 'bot', lang);
+    const replyLang = result.language || lang;
+    const response = bubble(result.reply, 'bot', replyLang);
     if (result.simulated) {
       const notice = document.createElement('small');
       notice.textContent = config.mode === 'rehearsal' ? 'Prepared rehearsal reply' : 'Simulated reply';
@@ -219,11 +222,11 @@ async function ask(text, lang) {
     }
     appendSources(result.sources);
     $('mood').textContent = result.reply.slice(0, 90);
-    $('mood').lang = lang;
+    $('mood').lang = replyLang;
     setPhase('idle');
     hint.textContent = result.source_mode === 'live_unavailable' ?
       'Current information could not be verified.' : readyMessage();
-    void speak(result.reply, lang, response);
+    void speak(result.reply, replyLang, response);
   } catch (error) {
     bubble('Could not answer. ' + error.message);
     setPhase('idle', 'Please try again.');

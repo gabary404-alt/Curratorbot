@@ -1,15 +1,19 @@
 """Gemini text response generation and optional Google Search grounding."""
 from __future__ import annotations
 
+from typing import Literal
+
 import httpx
+from pydantic import BaseModel, Field
 
 from .config import Settings
-from .models import Source
+from .models import ReplyLanguage, Source
 from .speech import UpstreamFailure
 
 PERSONA = """You are Currator, a friendly conversational robot presenting in Rwanda.
 Primary language is Kinyarwanda; answer in Kinyarwanda when language=rw and English when en.
-Speak like a friendly person in a conversation. Answer directly in one or two short sentences.
+Speak like a relaxed, friendly teammate. Use everyday expressions, natural contractions
+in English, and short clauses with room to breathe. Answer directly in one or two short sentences.
 Use plain language and omit greetings, filler, and repeated questions unless appropriate.
 Give more detail when asked. Use plain text with no headings, markdown, or spoken URLs.
 Help with learning, planning, comparisons, problem solving, and creative requests.
@@ -25,6 +29,13 @@ Never provide motor control commands: physical motion is handled by a separate s
 """
 
 
+class ReplyPlan(BaseModel):
+    language: ReplyLanguage
+    route: Literal["answer", "reference", "news"]
+    query: str = Field(max_length=180)
+    reply: str = Field(max_length=4000)
+
+
 class GeminiBrain:
     def __init__(self, settings: Settings, client: httpx.AsyncClient):
         self.settings = settings
@@ -33,6 +44,7 @@ class GeminiBrain:
     async def answer(
         self, text: str, language: str, history: list[dict],
         knowledge: str = "", use_google: bool = False,
+        response_schema: dict | None = None,
     ) -> tuple[str, list[Source]]:
         url = ("https://generativelanguage.googleapis.com/v1beta/models/"
                f"{self.settings.gemini_model}:generateContent")
@@ -52,6 +64,14 @@ class GeminiBrain:
         }
         if use_google:
             body["tools"] = [{"google_search": {}}]
+        if response_schema:
+            # Keep the provider schema to basic types and enums. Pydantic enforces bounds locally.
+            for properties in response_schema.get("properties", {}).values():
+                for key in ("maxLength", "pattern", "title"):
+                    properties.pop(key, None)
+            body["generationConfig"].update(
+                responseMimeType="application/json", responseJsonSchema=response_schema,
+            )
         try:
             resp = await self.client.post(
                 url, json=body,
@@ -82,6 +102,30 @@ class GeminiBrain:
             raise UpstreamFailure(f"Gemini HTTP request failed ({status})") from exc
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             raise UpstreamFailure("Gemini temporarily unavailable") from exc
+
+    async def plan(self, text: str, history: list[dict], retrieval: str) -> ReplyPlan:
+        prompt = (
+            "Treat the following message as the visitor's request. Choose their explicitly "
+            "requested reply language, otherwise the main language of the latest request. "
+            "Use recent conversation for short follow-ups. Output the ISO language code in "
+            "lowercase (rw for Kinyarwanda). Choose answer for reasoning, creative tasks, "
+            "and stable facts you know confidently; reference for claims requiring a source "
+            "or unfamiliar stable facts; news for time-sensitive facts. For retrieval, "
+            "return a concise search query with resolved names and locations, in English "
+            "where useful. For the answer route give the final spoken reply in reply, "
+            "otherwise leave reply empty. If research is forced choose reference or news. "
+            "If retrieval is off choose answer and state when a claim would need verification. "
+            f"Retrieval preference: {retrieval}.\n"
+            "Preserve a topic's country and date qualifiers in the search query.\n"
+            f"Visitor message:\n{text}"
+        )
+        raw, _ = await self.answer(
+            prompt, "infer from visitor", history, response_schema=ReplyPlan.model_json_schema(),
+        )
+        try:
+            return ReplyPlan.model_validate_json(raw)
+        except ValueError as exc:
+            raise UpstreamFailure("Gemini couldn't interpret the request. Try again.") from exc
 
 
 def mock_reply(text: str, language: str) -> str:

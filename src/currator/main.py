@@ -24,7 +24,7 @@ from .models import (ChatRequest, ChatResponse, Language, RobotCommand, RobotRes
                      SensorTelemetry, TranscriptionResponse)
 from .rehearsal import REPLIES, rehearsal_reply
 from .robot import RobotBridge
-from .speech import PindoSpeech, UpstreamFailure, transcribe_english_gemini
+from .speech import PindoSpeech, UpstreamFailure, casual_english_audio, transcribe_english_gemini
 
 settings = Settings()
 settings.validate()
@@ -70,10 +70,12 @@ app = FastAPI(title="Currator Bot API", version="0.1.0", lifespan=lifespan,
               dependencies=[Depends(require_demo_access)])
 
 
-def speech_input_languages() -> list[Language]:
+def speech_input_languages() -> list[str]:
     if settings.mode == "mock":
         return []
-    return ["rw", "en"] if settings.mode == "live" or app.state.english else ["rw"]
+    return ["auto", "rw", "en"] if settings.mode == "live" else (
+        ["rw", "en"] if app.state.english else ["rw"]
+    )
 
 
 @app.get("/api/status")
@@ -91,9 +93,10 @@ async def status():
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    language = "rw" if request.language == "auto" else request.language
     if settings.mode == "mock":
-        return ChatResponse(reply=mock_reply(request.text, request.language),
-                            language=request.language, simulated=True)
+        return ChatResponse(reply=mock_reply(request.text, language),
+                            language=language, simulated=True)
     if settings.mode == "rehearsal":
         if request.retrieval == "on":
             current = needs_current_info(request.text)
@@ -101,22 +104,22 @@ async def chat(request: ChatRequest):
                 evidence, sources = await news_lookup(request.text, app.state.client)
             else:
                 evidence, sources = await look_up(
-                    request.text, request.language, app.state.client, settings.wikimedia_user_agent,
+                    request.text, language, app.state.client, settings.wikimedia_user_agent,
                 )
             return ChatResponse(
                 reply=(
-                    "Reba amasoko akurikira." if request.language == "rw" else
+                    "Reba amasoko akurikira." if language == "rw" else
                     "I found these sources. Live AI can use them to answer your question."
                 ) if evidence else (
-                    "Sinabonye isoko kuri iki kibazo." if request.language == "rw" else
+                    "Sinabonye isoko kuri iki kibazo." if language == "rw" else
                     "I couldn't find a source for that. Try a shorter topic such as Kigali."
                 ),
-                language=request.language, sources=sources,
+                language=language, sources=sources,
                 source_mode="news" if current else "wikipedia",
             )
         return ChatResponse(
-            reply=rehearsal_reply(request.text, request.language),
-            language=request.language, source_mode="rehearsal", simulated=True,
+            reply=rehearsal_reply(request.text, language),
+            language=language, source_mode="rehearsal", simulated=True,
         )
     # In-memory recent history for MVP; no personal recordings stored.
     sessions: dict = app.state.sessions
@@ -129,27 +132,43 @@ async def chat(request: ChatRequest):
         request.retrieval == "on"
         or (request.retrieval == "auto" and needs_wikipedia(request.text))
     )
+    brain = GeminiBrain(settings, app.state.client)
+    query = request.text
+    direct_reply = ""
+    if request.language == "auto":
+        try:
+            plan = await brain.plan(request.text, history, request.retrieval)
+        except UpstreamFailure as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        language = plan.language
+        query = plan.query.strip() or request.text
+        uses_search = request.retrieval != "off" and plan.route == "news"
+        wikipedia = not uses_search and (
+            request.retrieval == "on"
+            or (request.retrieval == "auto" and plan.route == "reference")
+        )
+        if not (uses_search or wikipedia):
+            direct_reply = plan.reply.strip()
     extra_info, sources = "", []
     if uses_search and not settings.google_search_grounding:
-        extra_info, sources = await news_lookup(request.text, app.state.client)
+        extra_info, sources = await news_lookup(query, app.state.client)
     elif wikipedia:
         extra_info, sources = await look_up(
-            request.text, request.language, app.state.client,
+            query, language, app.state.client,
             settings.wikimedia_user_agent,
         )
-    if request.retrieval == "on" and wikipedia and not sources and not settings.google_search_grounding:
+    if (request.retrieval == "on" or request.language == "auto") and wikipedia and not sources and not settings.google_search_grounding:
         reply = (
             "Sinabonye isoko ryizewe kuri iki kibazo."
-            if request.language == "rw" else "I couldn't find a source for that."
+            if language == "rw" else "I couldn't find a source for that."
         )
-        return ChatResponse(reply=reply, language=request.language, source_mode="source_unavailable")
-    brain = GeminiBrain(settings, app.state.client)
+        return ChatResponse(reply=reply, language=language, source_mode="source_unavailable")
     try:
         use_google = settings.google_search_grounding and (uses_search or (wikipedia and not sources))
         if uses_search and not (use_google or sources):
             raise UpstreamFailure("No current sources available")
-        reply, search_sources = await brain.answer(
-            request.text, request.language, history, extra_info, use_google=use_google
+        reply, search_sources = (direct_reply, []) if direct_reply else await brain.answer(
+            request.text, language, history, extra_info, use_google=use_google
         )
         if use_google and not search_sources:
             raise UpstreamFailure("Gemini returned no grounded sources")
@@ -157,9 +176,9 @@ async def chat(request: ChatRequest):
         # Do not silently fall back to an ungrounded answer for a live-info question.
         if uses_search:
             reply = ("Sinshoboye kubona amakuru agezweho ubu. Ongera ugerageze."
-                     if request.language == "rw" else
+                     if language == "rw" else
                      "I can't verify live information right now. Please try again.")
-            return ChatResponse(reply=reply, language=request.language,
+            return ChatResponse(reply=reply, language=language,
                                 source_mode="live_unavailable")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     # Store bounded session history without permanent persistence.
@@ -171,7 +190,7 @@ async def chat(request: ChatRequest):
         if len(sessions) > 100:
             sessions.pop(next(iter(sessions)))
     all_sources = (search_sources or sources)[:4]
-    return ChatResponse(reply=reply, language=request.language,
+    return ChatResponse(reply=reply, language=language,
                         source_mode="google" if search_sources else
                         ("news" if uses_search else "wikipedia") if sources else "none",
                         sources=all_sources)
@@ -187,8 +206,8 @@ MAX_AUDIO_SIZE = (4 if HOSTED else 9) * 1024 * 1024
 @app.post("/api/speech/transcribe", response_model=TranscriptionResponse)
 async def transcribe(language: str = "rw", audio: UploadFile = File(...)):
     try:
-        if language not in {"rw", "en"}:
-            raise HTTPException(status_code=422, detail="Use rw or en")
+        if language not in {"auto", "rw", "en"}:
+            raise HTTPException(status_code=422, detail="Use auto, rw or en")
         if language not in speech_input_languages():
             raise HTTPException(status_code=503, detail="Speech recognition is unavailable in this mode")
         content_type = (audio.content_type or "").split(";")[0].strip().lower()
@@ -201,7 +220,7 @@ async def transcribe(language: str = "rw", audio: UploadFile = File(...)):
             raise HTTPException(status_code=413, detail="Recording is too large")
         if language == "rw":
             transcript = await PindoSpeech(settings, app.state.client).transcribe(raw, content_type)
-        elif app.state.english:
+        elif language == "en" and app.state.english:
             transcript = await app.state.english.transcribe(raw)
         else:
             gemini_mime = {
@@ -209,6 +228,7 @@ async def transcribe(language: str = "rw", audio: UploadFile = File(...)):
             }.get(content_type, content_type)
             transcript = await transcribe_english_gemini(
                 raw, gemini_mime, settings, app.state.client,
+                **({"automatic": True} if language == "auto" else {}),
             )
         if not transcript:
             raise HTTPException(status_code=422, detail="No speech recognized")
@@ -229,8 +249,12 @@ async def synthesize(request: SpeakRequest):
     if settings.mode == "mock":
         return {"audio_url": None, "provider": "mock", "simulated": True}
     if request.language == "en":
-        # English speech uses the browser's local speechSynthesis in prototype.
-        return {"audio_url": None, "provider": "browser-english", "simulated": False}
+        audio = (
+            await casual_english_audio(request.text, settings, app.state.client)
+            if settings.mode == "live" else None
+        )
+        return {"audio_url": audio, "provider": "gemini" if audio else "browser-english",
+                "simulated": False}
     cache = app.state.speech_cache
     cached = cache.get(request.text)
     if cached and cached[1] > time.monotonic():
