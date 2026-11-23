@@ -16,6 +16,7 @@ let phase = 'idle';
 let recording = null;
 let speech = null;
 const history = [];
+let lastSpeechLanguage = null;
 const END_OF_TURN_MS = 900;
 const AUDIO_CHECK_MS = 50;
 
@@ -226,7 +227,7 @@ async function requestReply(body, onProgress) {
         pending = pending.slice(newline + 1);
         if (event.error) throw new Error(event.error);
         if (event.reply) return event.reply;
-        if (event.phase === 'thinking' || event.phase === 'researching') {
+        if (['thinking', 'researching', 'preparing'].includes(event.phase)) {
           onProgress(event.phase);
         }
       }
@@ -247,13 +248,18 @@ async function ask(text, lang) {
   conversation.appendChild(progress);
   const updateProgress = state => {
     setPhase(state, activityLabels[state]);
-    progress.textContent = state === 'researching' ? 'Checking sources…' : 'Generating a reply…';
+    progress.textContent = {
+      researching: 'Checking sources…',
+      preparing: 'Getting your spoken reply ready…',
+      thinking: 'Generating a reply…',
+    }[state];
     conversation.scrollTop = conversation.scrollHeight;
   };
   updateProgress('thinking');
   try {
     const result = await requestReply({
       text, language: lang, session_id: sessionId, retrieval: $('retrieval').value, history,
+      include_audio: config.speech_output.length > 0,
     }, updateProgress);
     progress.remove();
     if (config.mode === 'live' && !['live_unavailable', 'source_unavailable'].includes(result.source_mode)) {
@@ -273,7 +279,15 @@ async function ask(text, lang) {
     setPhase('idle');
     hint.textContent = result.source_mode === 'live_unavailable' ?
       'Current information could not be verified.' : readyMessage();
-    void speak(result.reply, replyLang, response);
+    if (result.audio_error) {
+      hint.textContent = result.audio_error;
+      appendPlayButton(response, 'Play reply', () => void speak(result.reply, replyLang, response));
+    } else if (result.audio_url) {
+      void speak(result.reply, replyLang, response, result.audio_url);
+    } else if (result.audio_url === undefined) {
+      // Compatible with earlier servers during a rolling deployment.
+      void speak(result.reply, replyLang, response);
+    }
   } catch (error) {
     progress.remove();
     bubble('Could not answer. ' + error.message);
@@ -369,9 +383,12 @@ async function transcribe(capture) {
   form.append('audio', blob, 'question.' + suffix);
   setPhase('transcribing', 'Transcribing…');
   try {
-    const result = await api('/api/speech/transcribe?language=' + capture.lang, {
+    const speechQuery = '/api/speech/transcribe?language=' + capture.lang +
+      (capture.lang === 'auto' && lastSpeechLanguage === 'rw' ? '&language_hint=rw' : '');
+    const result = await api(speechQuery, {
       method: 'POST', body: form,
     });
+    lastSpeechLanguage = result.detected_language || null;
     if (result.needs_confirmation) {
       const lang = result.detected_language === 'rw' || capture.lang === 'rw' ? 'rw' : 'en';
       const message = lang === 'rw' ? 'Sinumvise neza. Wabivuga nanone?' :

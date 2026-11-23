@@ -95,14 +95,14 @@ async def status():
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, accept: str = Header(default="")):
     if "application/x-ndjson" not in accept:
-        return await answer_chat(request)
+        return await prepare_chat(request)
 
     async def events():
         messages = asyncio.Queue()
 
         async def run():
             try:
-                reply = await answer_chat(
+                reply = await prepare_chat(
                     request, lambda phase: messages.put_nowait({"phase": phase}),
                 )
                 messages.put_nowait({"reply": reply.model_dump()})
@@ -122,6 +122,23 @@ async def chat(request: ChatRequest, accept: str = Header(default="")):
 
     return StreamingResponse(events(), media_type="application/x-ndjson",
                              headers={"Cache-Control": "no-store"})
+
+
+async def prepare_chat(request: ChatRequest, progress=None):
+    reply = await answer_chat(request, progress)
+    if (not request.include_audio or not settings.gemini_api_key
+            or settings.mode == "mock" or reply.language not in {"rw", "en"}):
+        return reply
+    if progress is not None:
+        progress("preparing")
+    try:
+        # Keep synthesized audio in the same response and release text if voice is slow.
+        reply.audio_url = await asyncio.wait_for(
+            currator_voice(reply.reply[:800], settings, app.state.client), timeout=8,
+        )
+    except (TimeoutError, UpstreamFailure):
+        reply.audio_error = "Voice is taking longer than usual. Tap Play reply to try again."
+    return reply
 
 
 async def answer_chat(request: ChatRequest, progress=None):
@@ -246,7 +263,8 @@ MAX_AUDIO_SIZE = (4 if HOSTED else 9) * 1024 * 1024
 
 
 @app.post("/api/speech/transcribe", response_model=TranscriptionResponse)
-async def transcribe(language: str = "rw", audio: UploadFile = File(...)):
+async def transcribe(language: str = "rw", language_hint: Language | None = None,
+                     audio: UploadFile = File(...)):
     try:
         if language not in {"auto", "rw", "en"}:
             raise HTTPException(status_code=422, detail="Use auto, rw or en")
@@ -273,6 +291,7 @@ async def transcribe(language: str = "rw", audio: UploadFile = File(...)):
             if language == "auto":
                 transcript, confirmation, detected_language = await transcribe_automatic(
                     raw, content_type, gemini_mime, settings, app.state.client,
+                    prefer_rw=language_hint == "rw",
                 )
             else:
                 transcript = await transcribe_english_gemini(

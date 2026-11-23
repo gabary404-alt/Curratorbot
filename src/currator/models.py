@@ -21,6 +21,7 @@ class ChatRequest(BaseModel):
     session_id: str = Field(default="demo", pattern=r"^[\w-]{1,64}$")
     retrieval: Literal["auto", "on", "off"] = "auto"
     history: list[ChatTurn] | None = Field(default=None, max_length=6)
+    include_audio: bool = False
 
 
 class Source(BaseModel):

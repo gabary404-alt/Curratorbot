@@ -34,19 +34,30 @@ class DetectedSpeech(BaseModel):
 
 async def transcribe_automatic(
     raw: bytes, mime: str, gemini_mime: str, settings: Settings, client: httpx.AsyncClient,
+    *, prefer_rw: bool = False,
 ) -> tuple[str, bool, str]:
-    result = await transcribe_english_gemini(raw, gemini_mime, settings, client, automatic=True)
+    async def recognize_rw():
+        try:
+            return await asyncio.wait_for(PindoSpeech(settings, client).transcribe(raw, mime), 3)
+        except (TimeoutError, UpstreamFailure):
+            return None
+
+    # Overlap the two recognizers after a Kinyarwanda turn. Gemini still chooses the language.
+    parallel = asyncio.create_task(recognize_rw()) if prefer_rw else None
     try:
-        detected = DetectedSpeech.model_validate_json(result)
-    except ValueError as exc:
-        raise UpstreamFailure("Speech detection couldn't verify the recording. Try again.") from exc
-    original = detected.text.strip()
-    if not original or detected.language != "rw":
-        return original, detected.unclear, detected.language
-    try:
-        specialist = await asyncio.wait_for(PindoSpeech(settings, client).transcribe(raw, mime), 7)
-    except (TimeoutError, UpstreamFailure):
-        return original, detected.unclear, detected.language
+        result = await transcribe_english_gemini(raw, gemini_mime, settings, client, automatic=True)
+        try:
+            detected = DetectedSpeech.model_validate_json(result)
+        except ValueError as exc:
+            raise UpstreamFailure("Speech detection couldn't verify the recording. Try again.") from exc
+        original = detected.text.strip()
+        if not original or detected.language != "rw":
+            return original, detected.unclear, detected.language
+        specialist = await parallel if parallel else await recognize_rw()
+    finally:
+        if parallel is not None and not parallel.done():
+            parallel.cancel()
+            await asyncio.gather(parallel, return_exceptions=True)
     if not specialist:
         return original, detected.unclear, detected.language
     a = re.findall(r"\w+", original.casefold())
@@ -231,6 +242,8 @@ async def transcribe_english_gemini(
             responseMimeType="application/json",
             responseJsonSchema=DetectedSpeech.model_json_schema(),
         )
+    if settings.gemini_model in {"gemini-3.1-flash-lite", "gemini-3.5-flash-lite"}:
+        body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "MINIMAL"}
     try:
         resp = await generate(
             client, endpoint, body=body, key=settings.gemini_api_key,

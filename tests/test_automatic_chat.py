@@ -61,3 +61,22 @@ def test_research_progress_arrives_as_stream_events(monkeypatch):
     events = [json.loads(line) for line in response.text.splitlines()]
     assert events[:2] == [{"phase": "thinking"}, {"phase": "researching"}]
     assert events[2]["reply"]["sources"][0]["label"] == "Kigali"
+
+
+def test_voice_and_text_arrive_in_one_final_event(monkeypatch):
+    monkeypatch.setattr(main, "settings", Settings(mode="rehearsal", gemini_api_key="test"))
+
+    async def voice(text, *_):
+        assert "Nshuti" in text
+        return "data:audio/wav;base64,UklGRg=="
+
+    monkeypatch.setattr(main, "currator_voice", voice)
+    with TestClient(main.app) as client:
+        result = client.post(
+            "/api/chat", json={"text": "Witwa nde?", "include_audio": True},
+            headers={"Accept": "application/x-ndjson"},
+        )
+    events = [json.loads(line) for line in result.text.splitlines()]
+    assert events[1] == {"phase": "preparing"}
+    assert "Nshuti" in events[2]["reply"]["reply"]
+    assert events[2]["reply"]["audio_url"].startswith("data:audio/wav")
