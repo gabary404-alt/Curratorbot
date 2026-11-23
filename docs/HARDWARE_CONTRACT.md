@@ -13,16 +13,16 @@
 Pi → ESP32 examples (the robot module uses exactly this transport if enabled):
 
 ```json
-{"cmd":"stop"}
-{"cmd":"drive","linear":0.08,"duration_ms":350}
-{"cmd":"turn","angular":0.4,"duration_ms":350}
+{"cmd":"stop","id":"142edb2787d3c96f"}
+{"cmd":"drive","linear":0.08,"duration_ms":350,"id":"806f692fad6592da"}
+{"cmd":"turn","angular":0.4,"duration_ms":350,"id":"c24810cfdb3d5693"}
 ```
 
 - `linear` is **meters per second**, magnitude capped in software at 0.15 m/s.
 - `angular` is **radians per second**, positive = left by convention, magnitude capped at 0.4.
 - `duration_ms` max 750 ms. Firmware MUST validate all three fields, clamp independently, and stop at command expiration.
-- Firmware should send an ACK containing `cmd`, execution status, and timestamp (ACK parsing not yet implemented).
-- Current serial writer opens the port per call and only writes; no ACK. This is a **prototype interface**, not proof of execution. Firmware must reject malformed JSON and implement command watchdogs.
+- Firmware echoes the command ID and action, with an explicit boolean acceptance field. For example, `{"type":"ack","id":"142edb2787d3c96f","cmd":"stop","accepted":true}`.
+- Acknowledgements report controller acceptance. The app waits up to 500 ms and requires an acknowledged stop after a write failure or missing confirmation. Firmware must reject malformed JSON and enforce its own watchdog and stop behavior.
 
 ESP32 → Pi obstacle telemetry (proposed payload):
 
@@ -30,7 +30,9 @@ ESP32 → Pi obstacle telemetry (proposed payload):
 {"front_cm":120.0,"left_cm":90.0,"right_cm":110.0,"bumper_pressed":false,"emergency_stop":false}
 ```
 
-The bridge currently receives telemetry via `POST /api/robot/telemetry` behind the operator token; converting incoming serial telemetry to the API is a Day 9 integration task. **Do not rely on this HTTP endpoint as the sole safety mechanism.** Onboard sensors and E-stop always win.
+In serial mode, the app accepts telemetry from the USB controller. Send at least five sensor
+frames per second. The app refuses movement if a valid frame is older than 1.5 seconds.
+The HTTP telemetry endpoint is for mock transport. Onboard sensors and E-stop always win.
 
 ## Physical acceptance gates before enabling motion
 

@@ -1,23 +1,49 @@
 """Gemini text response generation and optional Google Search grounding."""
 from __future__ import annotations
 
+from typing import Literal
+
 import httpx
+from pydantic import BaseModel, Field
 
 from .config import Settings
-from .models import Source
+from .gemini_http import failure_message, generate, logger
+from .kinyarwanda import SPEAKING_GUIDANCE
+from .models import ReplyLanguage, Source
 from .speech import UpstreamFailure
 
-PERSONA = """You are Currator, a friendly conversational robot presenting in Rwanda.
+PERSONA = """You are Nshuti, a friendly conversational robot presenting in Rwanda.
+Currator Bot is the project name. If someone asks your name or requests an introduction,
+say Nshuti. In ordinary replies, start with the answer. Do not add your name as an opener,
+signature, or catchphrase. A simple greeting is enough when someone says hello.
 Primary language is Kinyarwanda; answer in Kinyarwanda when language=rw and English when en.
-Speak like a friendly person in a conversation. Answer directly in one or two short sentences.
+Sound like a warm, easygoing conversation partner. Use everyday expressions, natural
+contractions in English, and short clauses with room to breathe. Answer directly in one
+or two short sentences. If someone sounds worried or frustrated, acknowledge the specific
+thing they are dealing with and offer a small, doable next step. Match the mood: light
+humor is welcome in a playful exchange, and quiet reassurance suits a difficult one.
+Vary how you start. Avoid canned sympathy, forced slang, and a follow-up question at
+the end of every reply.
 Use plain language and omit greetings, filler, and repeated questions unless appropriate.
 Give more detail when asked. Use plain text with no headings, markdown, or spoken URLs.
+Help with learning, planning, comparisons, problem solving, and creative requests.
+Work through the problem and briefly explain the reasoning that supports your answer.
+Prefer Rwandan context and examples when helpful, and respect any location the user specifies.
 Never pretend to have sensed, moved, or seen something unless hardware
 telemetry confirms it. Do not invent current facts, opening hours, directions or search results.
 When sources are given, rely on them and say when data is insufficient. Clearly admit uncertainty.
-You are an AI robot, not a human person. You may share your name and describe your abilities.
+Headlines only establish what a publisher reported. Never infer a live price, weather forecast,
+or other current fact the headline does not explicitly establish.
+Be honest about being an AI robot when your identity or abilities come up.
 Never provide motor control commands: physical motion is handled by a separate safety service.
-"""
+""" + SPEAKING_GUIDANCE
+
+
+class ReplyPlan(BaseModel):
+    language: ReplyLanguage
+    route: Literal["answer", "reason", "reference", "news"]
+    query: str = Field(max_length=180)
+    reply: str = Field(max_length=4000)
 
 
 class GeminiBrain:
@@ -28,6 +54,7 @@ class GeminiBrain:
     async def answer(
         self, text: str, language: str, history: list[dict],
         knowledge: str = "", use_google: bool = False,
+        response_schema: dict | None = None,
     ) -> tuple[str, list[Source]]:
         url = ("https://generativelanguage.googleapis.com/v1beta/models/"
                f"{self.settings.gemini_model}:generateContent")
@@ -40,16 +67,28 @@ class GeminiBrain:
         body: dict = {
             "system_instruction": {"parts": [{"text": PERSONA}]},
             "contents": contents,
-            "generationConfig": {"temperature": 0.55, "maxOutputTokens": 280},
+            "generationConfig": {
+                "temperature": 0.55, "maxOutputTokens": 800,
+                "thinkingConfig": {"thinkingLevel": "LOW"},
+            },
         }
         if use_google:
             body["tools"] = [{"google_search": {}}]
-        try:
-            resp = await self.client.post(
-                url, json=body,
-                headers={"x-goog-api-key": self.settings.gemini_api_key}, timeout=30,
+        if response_schema:
+            if self.settings.gemini_model in {"gemini-3.1-flash-lite", "gemini-3.5-flash-lite"}:
+                body["generationConfig"]["thinkingConfig"]["thinkingLevel"] = "MINIMAL"
+            # Keep the provider schema to basic types and enums. Pydantic enforces bounds locally.
+            for properties in response_schema.get("properties", {}).values():
+                for key in ("maxLength", "pattern", "title"):
+                    properties.pop(key, None)
+            body["generationConfig"].update(
+                responseMimeType="application/json", responseJsonSchema=response_schema,
             )
-            resp.raise_for_status()
+        try:
+            resp = await generate(
+                self.client, url, body=body, key=self.settings.gemini_api_key,
+                operation="chat", timeout=25,
+            )
             candidates = resp.json().get("candidates", [])
             if not candidates:
                 raise UpstreamFailure("No Gemini response received")
@@ -69,19 +108,47 @@ class GeminiBrain:
             status = exc.response.status_code
             if status in (400, 403) and use_google:
                 raise UpstreamFailure("Google Search grounding not enabled for this free-tier model") from exc
-            if status == 429:
-                raise UpstreamFailure("Gemini free-tier quota or rate limit reached") from exc
-            raise UpstreamFailure(f"Gemini HTTP request failed ({status})") from exc
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
-            raise UpstreamFailure("Gemini temporarily unavailable") from exc
+            raise UpstreamFailure(failure_message(exc, "chat")) from exc
+        except httpx.HTTPError as exc:
+            raise UpstreamFailure(failure_message(exc, "chat")) from exc
+        except (ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
+            logger.warning("Gemini chat unreadable response error=%s", type(exc).__name__)
+            raise UpstreamFailure("Gemini returned an unreadable reply. Please try again.") from exc
+
+    async def plan(self, text: str, history: list[dict], retrieval: str) -> ReplyPlan:
+        prompt = (
+            "Treat the following message as the visitor's request. Choose their explicitly "
+            "requested reply language, otherwise the main language of the latest request. "
+            "Use recent conversation for short follow-ups. Output the ISO language code in "
+            "lowercase (rw for Kinyarwanda). Choose answer for reasoning, creative tasks, "
+            "and stable facts you know confidently. Choose reason for questions requiring "
+            "substantial reasoning or several steps. Choose reference for claims requiring a source "
+            "or unfamiliar stable facts; news for time-sensitive facts. Current officeholders, "
+            "recent events, live prices, business hours, and current local information need "
+            "fresh sources even if the visitor does not ask you to search. For retrieval, "
+            "return a concise search query with resolved names and locations, in English "
+            "where useful. For the answer route give the final spoken reply in reply, "
+            "otherwise leave reply empty. If research is forced choose reference or news. "
+            "If retrieval is off choose answer or reason and say when verification is needed. "
+            f"Retrieval preference: {retrieval}.\n"
+            "Preserve a topic's country and date qualifiers in the search query.\n"
+            f"Visitor message:\n{text}"
+        )
+        raw, _ = await self.answer(
+            prompt, "infer from visitor", history, response_schema=ReplyPlan.model_json_schema(),
+        )
+        try:
+            return ReplyPlan.model_validate_json(raw)
+        except ValueError as exc:
+            raise UpstreamFailure("Gemini couldn't interpret the request. Try again.") from exc
 
 
 def mock_reply(text: str, language: str) -> str:
     t = text.lower()
     if "witwa" in t or "name" in t:
-        return ("Nitwa Currator, ndi robot ifasha abantu gusubiza ibibazo!"
+        return ("Nitwa Nshuti, ndi robot ifasha abantu gusubiza ibibazo!"
                 if language == "rw" else
-                "I'm Currator, a friendly robot assistant. Nice to meet you!")
+                "I'm Nshuti, a friendly robot assistant. Nice to meet you!")
     if "muraho" in t or "hello" in t or "hi" == t:
         return ("Muraho neza! Nishimiye kuganira nawe."
                 if language == "rw" else "Hello! Great to meet you. What would you like to know?")

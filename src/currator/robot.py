@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
 from dataclasses import dataclass
 
 from .config import Settings
 from .models import RobotCommand, SensorTelemetry
+from .usb_check import Frames, decode_frame
 
 
 @dataclass
@@ -36,15 +38,69 @@ class RobotBridge:
         self.telemetry = Telemetry()
         self._lock = asyncio.Lock()
         self.log: list[dict] = []
+        self.port = None
+        self.pending: dict[str, tuple[str, asyncio.Future]] = {}
+        self.motion_uncertain = False
+
+    async def receive_serial(self):
+        """Maintain one connection and trust only frames received from the controller."""
+        try:
+            import serial
+        except ImportError:
+            return
+        while True:
+            try:
+                self.port = serial.Serial(
+                    self.settings.robot_serial_port, self.settings.robot_serial_baud,
+                    timeout=0.05, write_timeout=0.25,
+                )
+                frames = Frames()
+                while True:
+                    chunk = await asyncio.to_thread(self.port.read, 256)
+                    for frame in frames.feed(chunk):
+                        self._receive_frame(frame)
+            except (OSError, ValueError):
+                pass
+            finally:
+                self.telemetry = Telemetry()
+                if self.port is not None:
+                    try:
+                        self.port.close()
+                    except OSError:
+                        pass
+                    self.port = None
+                for _, waiter in self.pending.values():
+                    if not waiter.done():
+                        waiter.set_result(None)
+            await asyncio.sleep(1)
+
+    def _receive_frame(self, frame: bytes):
+        try:
+            payload = json.loads(frame)
+        except ValueError:
+            return
+        if not isinstance(payload, dict):
+            return
+        if payload.get("type") == "ack":
+            command_id = payload.get("id")
+            accepted = payload.get("accepted")
+            if isinstance(command_id, str) and type(accepted) is bool:
+                action, waiter = self.pending.get(command_id, (None, None))
+                if waiter is not None and not waiter.done() and payload.get("cmd") == action:
+                    waiter.set_result(accepted)
+            return
+        telemetry = decode_frame(frame)
+        if telemetry is not None:
+            self.update_telemetry(telemetry)
 
     def update_telemetry(self, value: SensorTelemetry):
         self.telemetry = Telemetry(value=value, received_at=time.monotonic())
 
     async def send(self, command: RobotCommand):
+        if self.settings.robot_transport == "serial":
+            return await self._send_serial(command)
         async with self._lock:
             payload = self._command_payload(command)
-            if self.settings.robot_transport == "serial":
-                await asyncio.to_thread(self._serial_write, payload)
             self.log.append(payload)
             self.log[:] = self.log[-50:]
         return payload
@@ -72,14 +128,35 @@ class RobotBridge:
             raise PermissionError("Obstacle too close for turning")
         return {"cmd": "turn", "angular": 0.35, "duration_ms": command.duration_ms}
 
-    def _serial_write(self, payload: dict):
-        # pyserial is optional and serial protocol requires the firmware team to implement it.
+    async def _send_serial(self, command: RobotCommand):
+        command_id = secrets.token_hex(8)
+        waiter = asyncio.get_running_loop().create_future()
+        action = None
         try:
-            import serial  # type: ignore[import-not-found]
-        except ImportError as exc:
-            raise RuntimeError("Install currator-bot[serial] for serial hardware") from exc
-        with serial.Serial(self.settings.robot_serial_port,
-                           self.settings.robot_serial_baud, timeout=1,
-                           write_timeout=1) as port:
-            port.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
-            port.flush()
+            async with self._lock:
+                payload = self._command_payload(command)
+                action = payload["cmd"]
+                if self.port is None:
+                    raise RuntimeError("USB controller disconnected")
+                if action != "stop" and (self.pending or self.motion_uncertain):
+                    raise PermissionError("Wait for command confirmation or send Stop to reset")
+                if len(self.pending) >= 2:
+                    raise PermissionError("Stop confirmation already pending")
+                self.pending[command_id] = action, waiter
+                wire = (json.dumps({**payload, "id": command_id}) + "\n").encode()
+                if await asyncio.to_thread(self.port.write, wire) != len(wire):
+                    raise OSError("Incomplete serial write")
+            accepted = await asyncio.wait_for(waiter, timeout=0.5)
+            if accepted is None:
+                raise RuntimeError("USB controller disconnected before acknowledgement")
+            if not accepted:
+                raise PermissionError("Controller rejected command")
+            if action == "stop":
+                self.motion_uncertain = False
+            return payload
+        except (RuntimeError, OSError, asyncio.CancelledError):
+            if action and command_id in self.pending:
+                self.motion_uncertain = True
+            raise
+        finally:
+            self.pending.pop(command_id, None)

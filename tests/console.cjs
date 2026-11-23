@@ -12,8 +12,11 @@ class Element {
   }
   addEventListener(name, callback) { this.listeners[name] = callback; }
   setAttribute(name, value) { this[name] = value; }
-  appendChild(child) { this.children.push(child); return child; }
-  append(child) { this.children.push(child); }
+  appendChild(child) { child.parent = this; this.children.push(child); return child; }
+  append(child) { this.appendChild(child); }
+  remove() {
+    if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this);
+  }
   querySelector() { return null; }
 }
 
@@ -37,6 +40,11 @@ let useDeferredTts = false;
 let microphoneError = null;
 let capture;
 let utterances = [];
+let audioLevel = 0;
+let clock = 0;
+let sampleAudio;
+let audioContextCloses = 0;
+let transcription = {text: 'What is your name?'};
 
 class Recorder {
   static isTypeSupported() { return true; }
@@ -68,6 +76,9 @@ const environment = {
   }}},
   setTimeout(callback) { timers.set(++timerId, callback); return timerId; },
   clearTimeout(id) { timers.delete(id); },
+  setInterval(callback) { sampleAudio = callback; return 1; },
+  clearInterval() { sampleAudio = null; },
+  performance: {now: () => clock},
   window: {MediaRecorder: Recorder, speechSynthesis: {
     cancel() {}, getVoices: () => [{lang: 'en-US'}],
     speak(utterance) { utterances.push(utterance); utterance.onstart?.(); },
@@ -80,7 +91,7 @@ const environment = {
       speechRequests++;
       if (useDeferredTts) data = await new Promise(resolve => { pendingTts = resolve; });
       else data = {audio_url: 'https://api.pindo.io/test.wav'};
-    } else if (path.startsWith('/api/speech/transcribe')) data = {text: 'What is your name?'};
+    } else if (path.startsWith('/api/speech/transcribe')) data = transcription;
     else data = {reply: 'Currator', simulated: true, sources: []};
     return {ok: true, json: async () => data};
   },
@@ -132,8 +143,8 @@ const value = source => vm.runInContext(source, context);
   assert.equal(stoppedTracks, 1);
   assert.equal(timers.size, 0);
   assert.equal(value('phase'), 'idle');
-  assert.equal(utterances.length, 1);
-  utterances[0].onend();
+  assert.equal(utterances.length, 0);
+  assert.equal(element('face')['data-state'], 'speaking');
   console.log('PASS Recording keeps its language and releases microphone tracks');
 
   await element('record').listeners.click();
@@ -149,6 +160,49 @@ const value = source => vm.runInContext(source, context);
   assert.equal(value('phase'), 'idle');
   assert.match(element('hint').textContent, /permission was denied/);
   console.log('PASS Microphone permission failure returns to text input');
+
+  microphoneError = null;
+  environment.window.AudioContext = class {
+    state = 'running';
+    createMediaStreamSource() { return {connect() {}, disconnect() {}}; }
+    createAnalyser() {
+      return {getFloatTimeDomainData(samples) { samples.fill(audioLevel); }};
+    }
+    async resume() {}
+    async close() { audioContextCloses++; }
+  };
+  const sample = (level, count) => {
+    audioLevel = level;
+    for (let i = 0; i < count; i++) {
+      clock += 50;
+      sampleAudio();
+    }
+  };
+  const beforeTurn = requests.filter(request => request.path === '/api/chat').length;
+  await element('record').listeners.click();
+  sample(0, 22);
+  assert.equal(value('phase'), 'recording');
+  sample(0.08, 6);
+  sample(0, 8);
+  assert.equal(value('phase'), 'recording');
+  sample(0.06, 6);
+  sample(0, 18);
+  await flush();
+  assert.equal(value('phase'), 'idle');
+  assert.equal(requests.filter(request => request.path === '/api/chat').length, beforeTurn + 1);
+  assert.equal(audioContextCloses, 1);
+  assert.equal(sampleAudio, null);
+  console.log('PASS A pause after speech sends one turn and releases the microphone');
+
+  transcription = {text: 'Nagiye i Kigali', detected_language: 'rw', needs_confirmation: true};
+  await element('record').listeners.click();
+  await element('record').listeners.click();
+  await flush();
+  assert.equal(element('prompt').value, '');
+  assert.equal(requests.filter(request => request.path === '/api/chat').length, beforeTurn + 1);
+  assert.ok(element('conversation').children.some(entry => /Wabivuga nanone/.test(entry.textContent)));
+  assert.equal(JSON.parse(requests.at(-1).options.body).language, 'rw');
+  console.log('PASS Unclear Kinyarwanda asks for a spoken retry without filling the composer');
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;

@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import re
-from urllib.parse import quote
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from urllib.parse import quote, urlsplit
+from xml.etree import ElementTree
 
 import httpx
 
@@ -85,6 +88,112 @@ def needs_current_info(text: str) -> bool:
         "minisitiri w'intebe", "minisitiri w’intebe", "ikiguzi",
     )
     return matches_phrase(text, triggers)
+
+
+async def news_lookup(query: str, client: httpx.AsyncClient):
+    """Search recent global news coverage. Evidence is limited to headlines."""
+    terms = re.findall(r"[^\W_]+", query.casefold())[:30]
+    ignored = set(
+        "what who is are was were the a an in on of about for me tell please "
+        "current latest today now news this week updates give you can happening "
+        "amakuru mashya agezweho uyu munsi ubu ni iki nde mu i kuri kuriya "
+        "mbwira amakuru ibibera ibishya".split()
+    )
+    keywords = list(dict.fromkeys(word for word in terms if len(word) > 1 and word not in ignored))
+    search = " ".join(f'"{word}"' for word in keywords[:5]) or "Rwanda"
+
+    async def fetch():
+        response = await client.get(
+            "https://api.gdeltproject.org/api/v2/doc/doc",
+            params={"query": search, "mode": "artlist", "format": "json",
+                    "timespan": "7d", "maxrecords": 4, "sort": "hybridrel"},
+        )
+        response.raise_for_status()
+        evidence, sources = [], []
+        for article in response.json().get("articles", [])[:4]:
+            title, url = article.get("title"), article.get("url")
+            if not isinstance(title, str) or not isinstance(url, str):
+                continue
+            parsed = urlsplit(url)
+            if not title.strip() or parsed.scheme != "https" or not parsed.hostname or url in {
+                source.url for source in sources
+            }:
+                continue
+            seen = article.get("seendate", "")
+            date = seen[:8] if isinstance(seen, str) else ""
+            evidence.append(f"Headline indexed {date}: {title[:220]}")
+            sources.append(Source(label=f"{parsed.hostname}: {title[:140]}", url=url))
+        return "\n".join(evidence), sources
+
+    async def rss_news(endpoint, allowed_hosts, *, params=None, required_terms=()):
+        async with client.stream(
+            "GET", endpoint, params=params,
+            follow_redirects=True,
+        ) as response:
+            response.raise_for_status()
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > 256_000:
+                    return "", []
+        try:
+            root = ElementTree.fromstring(body)
+        except ElementTree.ParseError:
+            return "", []
+        evidence, sources = [], []
+        now = datetime.now(timezone.utc)
+        for item in root.findall("./channel/item")[:70]:
+            url = item.findtext("link", "")
+            title = item.findtext("title", "").strip()
+            link = urlsplit(url)
+            title_words = set(re.findall(r"[^\W_]+", title.casefold()))
+            if (not title or link.scheme != "https" or link.hostname not in allowed_hosts
+                    or any(term not in title_words for term in required_terms)):
+                continue
+            date = item.findtext("pubDate", "")[:40]
+            try:
+                published = parsedate_to_datetime(date)
+            except (ValueError, OverflowError):
+                continue
+            if published.tzinfo is None or not now - timedelta(days=7) <= published <= now:
+                continue
+            evidence.append(f"Headline published {date}: {title[:220]}")
+            sources.append(Source(label=title[:160], url=url))
+            if len(sources) == 4:
+                break
+        return "\n".join(evidence), sources
+
+    providers = [
+        fetch(),
+        rss_news(
+            "https://news.google.com/rss/search", {"news.google.com"},
+            params={"q": f"{' '.join(keywords[:5]) or 'Rwanda'} when:7d",
+                    "hl": "en", "gl": "RW", "ceid": "RW:en"},
+        ),
+    ]
+    local = {"rwanda", "rwandan", "kigali"}
+    broad = {"headlines", "breaking", "recent", "amakuru", "rw", "national", "top"}
+    if not keywords or local.intersection(keywords):
+        required = [word for word in keywords if word not in local | broad]
+        if "kigali" in keywords and not {"rwanda", "rwandan"}.intersection(keywords):
+            required.append("kigali")
+        providers.append(rss_news(
+            "https://www.ktpress.rw/feed/", {"www.ktpress.rw", "ktpress.rw"},
+            required_terms=required,
+        ))
+
+    tasks = [asyncio.create_task(_bounded_lookup(provider)) for provider in providers]
+    try:
+        for task in asyncio.as_completed(tasks):
+            result = await task
+            if result and result[1]:
+                return result
+        return "", []
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def needs_wikipedia(text: str) -> bool:

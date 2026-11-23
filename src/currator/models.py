@@ -6,14 +6,23 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field, StringConstraints
 
 Language = Literal["rw", "en"]
+ReplyLanguage = Annotated[str, StringConstraints(pattern=r"^[a-z]{2,3}$")]
 ChatText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1500)]
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "model"]
+    text: ChatText
 
 
 class ChatRequest(BaseModel):
     text: ChatText
-    language: Language = "rw"
+    language: Literal["auto", "rw", "en"] = "rw"
     session_id: str = Field(default="demo", pattern=r"^[\w-]{1,64}$")
     retrieval: Literal["auto", "on", "off"] = "auto"
+    history: list[ChatTurn] | None = Field(default=None, max_length=6)
+    include_audio: bool = False
+    latency_budget_ms: int | None = Field(default=None, ge=500, le=15_000)
 
 
 class Source(BaseModel):
@@ -23,7 +32,7 @@ class Source(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
-    language: Language
+    language: ReplyLanguage
     source_mode: str = "none"
     sources: list[Source] = Field(default_factory=list)
     simulated: bool = False
@@ -33,8 +42,10 @@ class ChatResponse(BaseModel):
 
 class TranscriptionResponse(BaseModel):
     text: str
-    language: Language
+    language: Literal["auto", "rw", "en"]
     simulated: bool = False
+    needs_confirmation: bool = False
+    detected_language: str | None = None
 
 
 class RobotCommand(BaseModel):
