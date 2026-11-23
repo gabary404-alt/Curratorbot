@@ -16,6 +16,25 @@ header h1{font-size:20px;line-height:1.1;margin:0}header p{font-size:12px;color:
 .bubble .replay { display: block; margin-top: .5rem; }
 
 .activity { margin: 0; min-height: 1.2em; color: #a6dcff; font-size: .83rem; }
+.message-progress {
+  align-self: flex-end;
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin: -4px 4px 0;
+  color: #b5c9e6;
+  font-size: .8rem;
+}
+.message-progress::before {
+  content: "";
+  width: .42rem;
+  height: .42rem;
+  border-radius: 50%;
+  background: #6dddff;
+  animation: glow .75s ease-in-out infinite alternate;
+}
+.face[data-state="idle"] { animation: idle-sway 5s ease-in-out infinite; }
+.face[data-state="idle"] .eye { animation: idle-blink 6.7s ease-in-out infinite; }
 .face[data-state="recording"] { animation: listen 1.1s ease-in-out infinite alternate; }
 .face[data-state="thinking"] .eye { animation: glance 1.4s ease-in-out infinite alternate; }
 .face[data-state="researching"] .eye { animation: glance .65s ease-in-out infinite alternate; }
@@ -34,6 +53,16 @@ header h1{font-size:20px;line-height:1.1;margin:0}header p{font-size:12px;color:
 @keyframes glance { from { transform: translateX(-4px); } to { transform: translateX(4px); } }
 @keyframes glow { to { opacity: .42; } }
 @keyframes mouth { from { transform: scaleY(.45); } to { transform: scaleY(1.65); } }
+@keyframes idle-sway {
+  0%, 100% { transform: translateY(0) rotate(-1deg); }
+  50% { transform: translateY(-3px) rotate(1deg); }
+}
+@keyframes idle-blink {
+  0%, 44%, 49%, 91%, 96%, 100% { transform: scaleY(1); }
+  46%, 93% { transform: scaleY(.12); }
+}
 @media (prefers-reduced-motion: reduce) {
-  .face, .face .eye, .face .smile, .record.recording { animation: none !important; }
+  .face, .face .eye, .face .smile, .record.recording, .message-progress::before {
+    animation: none !important;
+  }
 }

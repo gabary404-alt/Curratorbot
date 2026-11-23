@@ -202,7 +202,7 @@ function appendSources(sources) {
   conversation.scrollTop = conversation.scrollHeight;
 }
 
-async function requestReply(body) {
+async function requestReply(body, onProgress) {
   const response = await fetch('/api/chat', {
     method: 'POST',
     headers: {'Content-Type': 'application/json', Accept: 'application/x-ndjson'},
@@ -227,7 +227,7 @@ async function requestReply(body) {
         if (event.error) throw new Error(event.error);
         if (event.reply) return event.reply;
         if (event.phase === 'thinking' || event.phase === 'researching') {
-          setPhase(event.phase, activityLabels[event.phase]);
+          onProgress(event.phase);
         }
       }
     }
@@ -241,11 +241,21 @@ async function requestReply(body) {
 async function ask(text, lang) {
   stopSpeech();
   bubble(text, 'user', lang === 'auto' ? undefined : lang);
-  setPhase('thinking', 'Thinking…');
+  const progress = document.createElement('div');
+  progress.className = 'message-progress';
+  progress.setAttribute('aria-hidden', 'true');
+  conversation.appendChild(progress);
+  const updateProgress = state => {
+    setPhase(state, activityLabels[state]);
+    progress.textContent = state === 'researching' ? 'Checking sources…' : 'Generating a reply…';
+    conversation.scrollTop = conversation.scrollHeight;
+  };
+  updateProgress('thinking');
   try {
     const result = await requestReply({
       text, language: lang, session_id: sessionId, retrieval: $('retrieval').value, history,
-    });
+    }, updateProgress);
+    progress.remove();
     if (config.mode === 'live' && !['live_unavailable', 'source_unavailable'].includes(result.source_mode)) {
       history.push({role: 'user', text}, {role: 'model', text: result.reply.slice(0, 1500)});
       if (history.length > 6) history.splice(0, 2);
@@ -265,6 +275,7 @@ async function ask(text, lang) {
       'Current information could not be verified.' : readyMessage();
     void speak(result.reply, replyLang, response);
   } catch (error) {
+    progress.remove();
     bubble('Could not answer. ' + error.message);
     setPhase('idle', 'Please try again.');
   }

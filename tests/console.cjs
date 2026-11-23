@@ -12,8 +12,11 @@ class Element {
   }
   addEventListener(name, callback) { this.listeners[name] = callback; }
   setAttribute(name, value) { this[name] = value; }
-  appendChild(child) { this.children.push(child); return child; }
-  append(child) { this.children.push(child); }
+  appendChild(child) { child.parent = this; this.children.push(child); return child; }
+  append(child) { this.appendChild(child); }
+  remove() {
+    if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this);
+  }
   querySelector() { return null; }
 }
 

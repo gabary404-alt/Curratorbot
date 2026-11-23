@@ -15,9 +15,9 @@
       <span id="status" class="status">Connecting…</span>
     </header>
     <section class="stage" aria-label="Robot display">
-      <div class="face" id="face"><span class="eye left"></span><span class="eye right"></span><span class="smile"></span></div>
+      <div class="face" id="face" data-state="idle"><span class="eye left"></span><span class="eye right"></span><span class="smile"></span></div>
       <p id="activity" class="activity" role="status"></p>
-      <p class="caption" id="mood">Muraho! Nitwa Nshuti.</p>
+      <p class="caption" id="mood">Muraho neza!</p>
       <p id="mode-warning" class="mode-warning"></p>
     </section>
     <div class="toolbar">
@@ -27,7 +27,7 @@
       <select id="retrieval"><option value="auto">Auto</option><option value="on">Research</option><option value="off">Chat only</option></select>
     </div>
     <section class="conversation" id="conversation" role="log" aria-live="polite" aria-label="Conversation">
-      <div class="bubble bot">Muraho neza! Greet me or ask me a question.</div>
+      <div class="bubble bot">Hey, I’m here. What’s on your mind?</div>
     </section>
     <form id="chat-form" class="compose">
       <button type="button" id="record" class="record" aria-label="Record spoken question" aria-pressed="false" title="Tap to record" disabled>🎙</button>
