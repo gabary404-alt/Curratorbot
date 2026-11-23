@@ -42,3 +42,22 @@ def test_auto_chat_uses_detected_language_and_fetches_only_when_requested(monkey
     assert searches == [("Kigali", "rw")]
     assert research.json()["source_mode"] == "wikipedia"
     assert research.json()["sources"][0]["label"] == "Kigali"
+import json
+
+
+
+def test_research_progress_arrives_as_stream_events(monkeypatch):
+    monkeypatch.setattr(main, "settings", Settings(mode="rehearsal"))
+
+    async def lookup(*_):
+        return "Kigali", [Source(label="Kigali", url="https://en.wikipedia.org/wiki/Kigali")]
+
+    monkeypatch.setattr(main, "look_up", lookup)
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/chat", json={"text": "Kigali", "retrieval": "on"},
+            headers={"Accept": "application/x-ndjson"},
+        )
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert events[:2] == [{"phase": "thinking"}, {"phase": "researching"}]
+    assert events[2]["reply"]["sources"][0]["label"] == "Kigali"

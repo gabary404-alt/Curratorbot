@@ -41,6 +41,7 @@ let audioLevel = 0;
 let clock = 0;
 let sampleAudio;
 let audioContextCloses = 0;
+let transcription = {text: 'What is your name?'};
 
 class Recorder {
   static isTypeSupported() { return true; }
@@ -87,7 +88,7 @@ const environment = {
       speechRequests++;
       if (useDeferredTts) data = await new Promise(resolve => { pendingTts = resolve; });
       else data = {audio_url: 'https://api.pindo.io/test.wav'};
-    } else if (path.startsWith('/api/speech/transcribe')) data = {text: 'What is your name?'};
+    } else if (path.startsWith('/api/speech/transcribe')) data = transcription;
     else data = {reply: 'Currator', simulated: true, sources: []};
     return {ok: true, json: async () => data};
   },
@@ -139,8 +140,8 @@ const value = source => vm.runInContext(source, context);
   assert.equal(stoppedTracks, 1);
   assert.equal(timers.size, 0);
   assert.equal(value('phase'), 'idle');
-  assert.equal(utterances.length, 1);
-  utterances[0].onend();
+  assert.equal(utterances.length, 0);
+  assert.equal(element('face')['data-state'], 'speaking');
   console.log('PASS Recording keeps its language and releases microphone tracks');
 
   await element('record').listeners.click();
@@ -189,6 +190,16 @@ const value = source => vm.runInContext(source, context);
   assert.equal(audioContextCloses, 1);
   assert.equal(sampleAudio, null);
   console.log('PASS A pause after speech sends one turn and releases the microphone');
+
+  transcription = {text: 'Nagiye i Kigali', detected_language: 'rw', needs_confirmation: true};
+  await element('record').listeners.click();
+  await element('record').listeners.click();
+  await flush();
+  assert.equal(element('prompt').value, '');
+  assert.equal(requests.filter(request => request.path === '/api/chat').length, beforeTurn + 1);
+  assert.ok(element('conversation').children.some(entry => /Wabivuga nanone/.test(entry.textContent)));
+  assert.equal(JSON.parse(requests.at(-1).options.body).language, 'rw');
+  console.log('PASS Unclear Kinyarwanda asks for a spoken retry without filling the composer');
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;

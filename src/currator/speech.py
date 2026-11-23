@@ -1,11 +1,10 @@
-"""Pindo Kinyarwanda + Gemini English adapters; no secret logging."""
+"""Pindo and Gemini speech recognition, plus Currator's shared voice."""
 from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import re
-import wave
+from difflib import SequenceMatcher
 from typing import Literal
 from urllib.parse import urljoin, urlsplit
 
@@ -34,7 +33,7 @@ class DetectedSpeech(BaseModel):
 
 async def transcribe_automatic(
     raw: bytes, mime: str, gemini_mime: str, settings: Settings, client: httpx.AsyncClient,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, str]:
     result = await transcribe_english_gemini(raw, gemini_mime, settings, client, automatic=True)
     try:
         detected = DetectedSpeech.model_validate_json(result)
@@ -42,56 +41,65 @@ async def transcribe_automatic(
         raise UpstreamFailure("Speech detection couldn't verify the recording. Try again.") from exc
     original = detected.text.strip()
     if not original or detected.language != "rw":
-        return original, detected.unclear
+        return original, detected.unclear, detected.language
     try:
         specialist = await asyncio.wait_for(PindoSpeech(settings, client).transcribe(raw, mime), 7)
     except (TimeoutError, UpstreamFailure):
-        return original, detected.unclear
+        return original, detected.unclear, detected.language
     if not specialist:
-        return original, detected.unclear
+        return original, detected.unclear, detected.language
     a = re.findall(r"\w+", original.casefold())
     b = re.findall(r"\w+", specialist.casefold())
-    differs = a != b
-    return specialist, detected.unclear or differs
+    materially_different = SequenceMatcher(None, a, b, autojunk=False).ratio() < 0.55
+    def critical(tokens):
+        return [word for word in tokens if (
+            any(char.isdigit() for char in word) or word.startswith(("sin", "nti", "nta"))
+        )]
+
+    needs_review = detected.unclear or materially_different or critical(a) != critical(b)
+    return specialist, needs_review, detected.language
 
 
-async def casual_english_audio(text: str, settings: Settings, client: httpx.AsyncClient) -> str | None:
-    """Use the existing Gemini key for an expressive English voice, with a short timeout."""
+async def currator_voice(text: str, settings: Settings, client: httpx.AsyncClient) -> str:
+    """Speak the supplied text using the same Gemini voice in both languages."""
     try:
         response = await client.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            "gemini-2.5-flash-preview-tts:generateContent",
+            "https://generativelanguage.googleapis.com/v1beta/interactions",
             headers={"x-goog-api-key": settings.gemini_api_key},
             json={
-                "contents": [{"parts": [{"text": (
-                    "Read only the quoted passage. Sound like a relaxed, upbeat teammate "
-                    "speaking to one visitor, with light warmth and natural pauses.\n"
-                    f"Passage:\n{text}"
-                )}]}],
-                "generationConfig": {
-                    "responseModalities": ["AUDIO"],
-                    "speechConfig": {"voiceConfig": {
-                        "prebuiltVoiceConfig": {"voiceName": "Zubenelgenubi"},
-                    }},
+                "model": "gemini-3.8-flash-lite-tts",
+                "store": False,
+                "input": [{"type": "user_input", "content": [{
+                    "type": "text",
+                    "text": prepare_for_speech(text),
+                    "annotations": [{
+                        "type": "speech_metadata",
+                        "style": (
+                            "A warm, relaxed conversation partner. Use the natural rhythm "
+                            "of the language, breathe at punctuation, and pronounce Kinyarwanda "
+                            "names and vowel sounds carefully. Read only the supplied words."
+                        ),
+                    }],
+                }]}],
+                "response_format": {"type": "audio"},
+                "generation_config": {
+                    "speech_config": [{"voice": "Zubenelgenubi"}],
                 },
             },
-            timeout=8,
+            timeout=18,
         )
         response.raise_for_status()
-        parts = response.json()["candidates"][0]["content"]["parts"]
-        raw = next(part["inlineData"]["data"] for part in parts if "inlineData" in part)
-        if len(raw) > 3_200_000:
-            return None
-        pcm = base64.b64decode(raw, validate=True)
-        if not pcm or len(pcm) % 2:
-            return None
-        output = io.BytesIO()
-        with wave.open(output, "wb") as wav:
-            wav.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
-            wav.writeframes(pcm)
-        return "data:audio/wav;base64," + base64.b64encode(output.getvalue()).decode("ascii")
-    except (httpx.HTTPError, KeyError, IndexError, StopIteration, TypeError, ValueError):
-        return None
+        clips = [
+            item["data"] for step in response.json()["steps"]
+            if step["type"] == "model_output"
+            for item in step["content"] if item["type"] == "audio"
+        ]
+        raw = clips[-1]
+        if len(raw) > 3_200_000 or not base64.b64decode(raw, validate=True).startswith(b"RIFF"):
+            raise ValueError("Invalid WAV")
+        return "data:audio/wav;base64," + raw
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+        raise UpstreamFailure("Currator's voice is unavailable. Try playing the reply again.") from exc
 
 
 def _read_data(payload: object) -> dict:

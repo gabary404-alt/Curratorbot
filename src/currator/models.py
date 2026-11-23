@@ -43,6 +43,7 @@ class TranscriptionResponse(BaseModel):
     language: Literal["auto", "rw", "en"]
     simulated: bool = False
     needs_confirmation: bool = False
+    detected_language: str | None = None
 
 
 class RobotCommand(BaseModel):

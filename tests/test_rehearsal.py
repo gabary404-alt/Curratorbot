@@ -17,7 +17,7 @@ def rehearsal(monkeypatch):
 def test_rehearsal_bilingual_prepared_replies(rehearsal):
     config = rehearsal.get("/api/status").json()
     assert config["speech_input"] == ["rw"]
-    assert config["speech_output"] == ["rw", "en"]
+    assert config["speech_output"] == []
     assert config["motion_enabled"] is False
     for language, text in [("rw", "Muraho! Witwa nde?"), ("en", "Hi, what's your name?")]:
         reply = rehearsal.post("/api/chat", json={"text": text, "language": language}).json()
@@ -26,15 +26,12 @@ def test_rehearsal_bilingual_prepared_replies(rehearsal):
         assert "Currator" in reply["reply"]
 
 
-def test_rehearsal_full_pindo_flow(rehearsal):
-    audio_url = "https://pindo-ai-api-generated.s3.af-south-1.amazonaws.com/voice.wav"
+def test_rehearsal_transcribes_without_a_voice_key(rehearsal):
 
     def handler(request):
         if request.url.path == "/ai/stt/rw/public":
             return httpx.Response(200, json={"data": {"text": "Witwa nde?"}})
-        assert request.url.path == "/ai/tts/rw/public"
-        assert b"Nitwa Currator" in request.content
-        return httpx.Response(200, json={"data": {"generated_audio_url": audio_url}})
+        raise AssertionError("Rehearsal without a key must not call a speech provider")
 
     provider_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     original_client = main.app.state.client
@@ -45,7 +42,7 @@ def test_rehearsal_full_pindo_flow(rehearsal):
         assert transcription.status_code == 200
         reply = rehearsal.post("/api/chat", json={"text": transcription.json()["text"]}).json()
         voice = rehearsal.post("/api/speech/synthesize", json={"text": reply["reply"]}).json()
-        assert voice == {"audio_url": audio_url, "provider": "pindo", "simulated": False}
+        assert voice == {"audio_url": None, "provider": "unavailable", "simulated": False}
     finally:
         main.app.state.client = original_client
         rehearsal.portal.call(provider_client.aclose)
@@ -133,17 +130,18 @@ async def test_wikimedia_prefers_requested_language_and_keeps_sources():
     ]
 
 
-def test_rehearsal_reuses_generated_speech(rehearsal, monkeypatch):
+def test_both_languages_use_the_same_voice(monkeypatch):
+    monkeypatch.setattr(main, "settings", Settings(mode="live", gemini_api_key="test"))
     calls = []
 
-    async def speak(self, text):
+    async def speak(text, *_):
         calls.append(text)
-        return "https://api.pindo.io/example.wav"
+        return "data:audio/wav;base64,UklGRg=="
 
-    monkeypatch.setattr(main.PindoSpeech, "speak", speak)
-    payload = {"text": main.REPLIES["rw"]["hello"], "language": "rw"}
-    first = rehearsal.post("/api/speech/synthesize", json=payload)
-    second = rehearsal.post("/api/speech/synthesize", json=payload)
-    assert first.status_code == second.status_code == 200
-    assert first.json() == second.json()
-    assert calls == [payload["text"]]
+    monkeypatch.setattr(main, "currator_voice", speak)
+    with TestClient(main.app) as client:
+        for text, language in (("Muraho", "rw"), ("Hello", "en")):
+            response = client.post("/api/speech/synthesize", json={"text": text, "language": language})
+            assert response.status_code == 200
+            assert response.json()["provider"] == "currator"
+    assert calls == ["Muraho", "Hello"]

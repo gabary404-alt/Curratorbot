@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
 import time
-from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
 import httpx
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, StringConstraints
@@ -22,10 +22,10 @@ from .english import LocalEnglishSpeech
 from .knowledge import look_up, needs_current_info, needs_wikipedia, news_lookup
 from .models import (ChatRequest, ChatResponse, Language, RobotCommand, RobotResult,
                      SensorTelemetry, TranscriptionResponse)
-from .rehearsal import REPLIES, rehearsal_reply
+from .rehearsal import rehearsal_reply
 from .robot import RobotBridge
 from .speech import (
-    PindoSpeech, UpstreamFailure, casual_english_audio, transcribe_automatic, transcribe_english_gemini,
+    PindoSpeech, UpstreamFailure, currator_voice, transcribe_automatic, transcribe_english_gemini,
 )
 
 settings = Settings()
@@ -38,7 +38,6 @@ async def lifespan(app: FastAPI):
         app.state.client = client
         app.state.robot = RobotBridge(settings)
         app.state.sessions = {}
-        app.state.speech_cache = OrderedDict()
         app.state.english = (
             await asyncio.to_thread(LocalEnglishSpeech, settings.vosk_model_path)
             if settings.vosk_model_path and settings.mode != "mock"
@@ -86,7 +85,7 @@ async def status():
         "name": "Currator Bot", "mode": settings.mode, "languages": ["rw", "en"],
         "voice_live": settings.mode != "mock",
         "speech_input": speech_input_languages(),
-        "speech_output": [] if settings.mode == "mock" else ["rw", "en"],
+        "speech_output": ["rw", "en"] if settings.mode != "mock" and settings.gemini_api_key else [],
         "motion_enabled": settings.enable_motion, "hosted": HOSTED,
         "robot_transport": settings.robot_transport,
         "note": "Health report shows configuration, not verified upstream availability",
@@ -94,13 +93,50 @@ async def status():
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, accept: str = Header(default="")):
+    if "application/x-ndjson" not in accept:
+        return await answer_chat(request)
+
+    async def events():
+        messages = asyncio.Queue()
+
+        async def run():
+            try:
+                reply = await answer_chat(
+                    request, lambda phase: messages.put_nowait({"phase": phase}),
+                )
+                messages.put_nowait({"reply": reply.model_dump()})
+            except HTTPException as exc:
+                messages.put_nowait({"error": exc.detail})
+            finally:
+                messages.put_nowait(None)
+
+        task = asyncio.create_task(run())
+        try:
+            while (message := await messages.get()) is not None:
+                yield json.dumps(message, ensure_ascii=False) + "\n"
+            await task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    return StreamingResponse(events(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-store"})
+
+
+async def answer_chat(request: ChatRequest, progress=None):
+    def report(phase):
+        if progress is not None:
+            progress(phase)
+
+    report("thinking")
     language = "rw" if request.language == "auto" else request.language
     if settings.mode == "mock":
         return ChatResponse(reply=mock_reply(request.text, language),
                             language=language, simulated=True)
     if settings.mode == "rehearsal":
         if request.retrieval == "on":
+            report("researching")
             current = needs_current_info(request.text)
             if current:
                 evidence, sources = await news_lookup(request.text, app.state.client)
@@ -152,6 +188,8 @@ async def chat(request: ChatRequest):
         if not (uses_search or wikipedia):
             direct_reply = plan.reply.strip()
     extra_info, sources = "", []
+    if uses_search or wikipedia:
+        report("researching")
     if uses_search and not settings.google_search_grounding:
         extra_info, sources = await news_lookup(query, app.state.client)
     elif wikipedia:
@@ -169,6 +207,8 @@ async def chat(request: ChatRequest):
         use_google = settings.google_search_grounding and (uses_search or (wikipedia and not sources))
         if uses_search and not (use_google or sources):
             raise UpstreamFailure("No current sources available")
+        if not use_google and not direct_reply:
+            report("thinking")
         reply, search_sources = (direct_reply, []) if direct_reply else await brain.answer(
             request.text, language, history, extra_info, use_google=use_google
         )
@@ -221,6 +261,7 @@ async def transcribe(language: str = "rw", audio: UploadFile = File(...)):
         if len(raw) > MAX_AUDIO_SIZE:
             raise HTTPException(status_code=413, detail="Recording is too large")
         confirmation = False
+        detected_language = None
         if language == "rw":
             transcript = await PindoSpeech(settings, app.state.client).transcribe(raw, content_type)
         elif language == "en" and app.state.english:
@@ -230,7 +271,7 @@ async def transcribe(language: str = "rw", audio: UploadFile = File(...)):
                 "audio/mp4": "audio/m4a", "audio/x-m4a": "audio/m4a", "audio/x-wav": "audio/wav",
             }.get(content_type, content_type)
             if language == "auto":
-                transcript, confirmation = await transcribe_automatic(
+                transcript, confirmation, detected_language = await transcribe_automatic(
                     raw, content_type, gemini_mime, settings, app.state.client,
                 )
             else:
@@ -240,7 +281,8 @@ async def transcribe(language: str = "rw", audio: UploadFile = File(...)):
         if not transcript:
             raise HTTPException(status_code=422, detail="No speech recognized")
         return TranscriptionResponse(text=transcript, language=language,
-                                     needs_confirmation=confirmation)
+                                     needs_confirmation=confirmation,
+                                     detected_language=detected_language)
     except UpstreamFailure as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
@@ -256,32 +298,11 @@ class SpeakRequest(BaseModel):
 async def synthesize(request: SpeakRequest):
     if settings.mode == "mock":
         return {"audio_url": None, "provider": "mock", "simulated": True}
-    if request.language == "en":
-        audio = (
-            await casual_english_audio(request.text, settings, app.state.client)
-            if settings.mode == "live" else None
-        )
-        return {"audio_url": audio, "provider": "gemini" if audio else "browser-english",
-                "simulated": False}
-    cache = app.state.speech_cache
-    cached = cache.get(request.text)
-    if cached and cached[1] > time.monotonic():
-        cache.move_to_end(request.text)
-        return {"audio_url": cached[0], "provider": "pindo", "simulated": False}
+    if not settings.gemini_api_key:
+        return {"audio_url": None, "provider": "unavailable", "simulated": False}
     try:
-        link = await PindoSpeech(settings, app.state.client).speak(request.text)
-        if not link:
-            raise HTTPException(
-                status_code=502,
-                detail="Pindo returned a missing or unsupported audio URL",
-            )
-        # Only cache unsigned media URLs and keep the cache in memory.
-        if settings.mode == "rehearsal" and request.text in REPLIES["rw"].values() and "?" not in link:
-            cache[request.text] = (link, time.monotonic() + 300)
-            cache.move_to_end(request.text)
-            if len(cache) > 64:
-                cache.popitem(last=False)
-        return {"audio_url": link, "provider": "pindo", "simulated": False}
+        audio = await currator_voice(request.text, settings, app.state.client)
+        return {"audio_url": audio, "provider": "currator", "simulated": False}
     except UpstreamFailure as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

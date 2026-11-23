@@ -29,7 +29,23 @@ function bubble(text, kind = 'bot', lang) {
   return entry;
 }
 
+const activityLabels = {
+  opening: 'Opening microphone…',
+  recording: 'Listening…',
+  transcribing: 'Understanding your speech…',
+  thinking: 'Thinking…',
+  researching: 'Checking sources…',
+  preparing: 'Preparing my voice…',
+  speaking: 'Speaking…',
+};
+
+function setFace(state) {
+  $('face').setAttribute('data-state', state);
+  $('activity').textContent = activityLabels[state] || '';
+}
+
 function setPhase(next, message) {
+  setFace(next);
   phase = next;
   const idle = phase === 'idle';
   const active = phase === 'recording';
@@ -93,8 +109,7 @@ function stopSpeech() {
   speech = null;
   previous?.controller.abort();
   previous?.player?.pause();
-  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-  $('face').classList.remove('talking');
+  setFace(phase);
   $('stop-audio').disabled = true;
 }
 
@@ -130,14 +145,15 @@ async function speak(text, lang, entry, audioUrl = null) {
   };
   const started = () => {
     if (speech === active) {
-      $('face').classList.add('talking');
+      setFace('speaking');
       hint.textContent = 'Speaking…';
     }
   };
 
   try {
-    if (!audioUrl && (lang !== 'en' || config.mode === 'live')) {
-      hint.textContent = 'Preparing voice…';
+    if (!audioUrl) {
+      setFace('preparing');
+      hint.textContent = 'Preparing my voice…';
       const data = await post('/api/speech/synthesize', {
         text: Array.from(text).slice(0, 800).join(''),
         language: lang,
@@ -145,24 +161,7 @@ async function speak(text, lang, entry, audioUrl = null) {
       if (speech !== active) return;
       audioUrl = data.audio_url;
     }
-    if (!audioUrl && lang === 'en') {
-      if (!('speechSynthesis' in window)) throw new Error('English speech unavailable on this device.');
-      const voices = window.speechSynthesis.getVoices().filter(item => item.lang.startsWith('en'));
-      const voice = voices.find(item => /natural|neural|premium/i.test(item.name)) || voices[0];
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = 'en-US';
-      utterance.rate = .98;
-      if (voice) utterance.voice = voice;
-      utterance.onstart = started;
-      utterance.onend = () => finish();
-      utterance.onerror = () => {
-        if (speech !== active) return;
-        appendPlayButton(entry, 'Try speech again', () => void speak(text, lang, entry));
-        finish('English speech unavailable. Check the installed English voice.');
-      };
-      window.speechSynthesis.speak(utterance);
-      return;
-    }
+    if (!audioUrl) throw new Error('Currator’s voice is temporarily unavailable.');
     active.player = new Audio(audioUrl);
     active.player.onplaying = started;
     active.player.onended = () => finish();
@@ -203,12 +202,48 @@ function appendSources(sources) {
   conversation.scrollTop = conversation.scrollHeight;
 }
 
+async function requestReply(body) {
+  const response = await fetch('/api/chat', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', Accept: 'application/x-ndjson'},
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || !response.headers?.get('content-type')?.includes('application/x-ndjson')) {
+    const result = await response.json();
+    if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Check your input and try again.');
+    return result;
+  }
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let pending = '';
+  try {
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      pending += value;
+      let newline;
+      while ((newline = pending.indexOf('\n')) !== -1) {
+        const event = JSON.parse(pending.slice(0, newline));
+        pending = pending.slice(newline + 1);
+        if (event.error) throw new Error(event.error);
+        if (event.reply) return event.reply;
+        if (event.phase === 'thinking' || event.phase === 'researching') {
+          setPhase(event.phase, activityLabels[event.phase]);
+        }
+      }
+    }
+    throw new Error('The reply was interrupted. Please try again.');
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 async function ask(text, lang) {
   stopSpeech();
   bubble(text, 'user', lang === 'auto' ? undefined : lang);
   setPhase('thinking', 'Thinking…');
   try {
-    const result = await post('/api/chat', {
+    const result = await requestReply({
       text, language: lang, session_id: sessionId, retrieval: $('retrieval').value, history,
     });
     if (config.mode === 'live' && !['live_unavailable', 'source_unavailable'].includes(result.source_mode)) {
@@ -327,9 +362,12 @@ async function transcribe(capture) {
       method: 'POST', body: form,
     });
     if (result.needs_confirmation) {
-      prompt.value = result.text;
-      setPhase('idle', 'Uzuza cyangwa ukosore amagambo numvise, hanyuma wohereze. / Review the transcript before sending.');
-      prompt.focus();
+      const lang = result.detected_language === 'rw' || capture.lang === 'rw' ? 'rw' : 'en';
+      const message = lang === 'rw' ? 'Sinumvise neza. Wabivuga nanone?' :
+        'I didn’t catch that clearly. Could you say it again?';
+      const reply = bubble(message, 'bot', lang);
+      setPhase('idle', message);
+      void speak(message, lang, reply);
       return;
     }
     await ask(result.text, capture.lang);

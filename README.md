@@ -5,8 +5,8 @@ Kinyarwanda-first voice assistant for the Currator wheeled robot demo. The softw
 | Mode | Replies | Kinyarwanda speech | English speech |
 | --- | --- | --- | --- |
 | `mock` | Prepared, offline | Disabled | Disabled |
-| `rehearsal` | Prepared, labeled | Pindo microphone transcription and spoken replies | Browser voice. Microphone available with the optional local Vosk model |
-| `live` | Gemini | Pindo microphone transcription and spoken replies | Gemini or local Vosk microphone transcription, plus browser voice |
+| `rehearsal` | Prepared, labeled | Pindo microphone transcription, shared voice with Gemini key | Optional local Vosk transcription, shared voice with Gemini key |
+| `live` | Gemini | Gemini and Pindo transcription, shared Currator voice | Gemini or local Vosk transcription, shared Currator voice |
 
 ## Run the voice rehearsal
 
@@ -30,11 +30,11 @@ python -m uvicorn currator.main:app --host 127.0.0.1 --port 8000
 Open [the console](http://127.0.0.1:8000/) in a browser. Choose Kinyarwanda, tap the
 microphone, say **“Witwa nde?”**, and pause. A pause of about a second ends the turn
 on supported browsers. You can also tap again to send. The page shows the transcript
-and plays the prepared reply in Pindo's voice. Try **“Muraho”**, **“Ukora iki?”**, or
+and plays the prepared reply using Currator’s voice when a Gemini key is configured. Try **“Muraho”**, **“Ukora iki?”**, or
 **“Urakoze”** next. For English, select English and type **“What's your name?”**.
-Check the browser's installed English voice and speaker volume.
+Check the speaker volume.
 
-Pindo's public endpoints require internet access and are rate-limited by IP. Rehearsal uses no API key. The robot's movement controls are separate from this screen.
+Pindo's public endpoints require internet access and are rate-limited by IP. Rehearsal conversations and Pindo transcription work without a key. Currator’s spoken output requires a Gemini key. The robot's movement controls are separate from this screen.
 
 ## Optional offline English recognition
 
@@ -68,7 +68,7 @@ python -m currator.simulate
 python -m currator.smoke
 ```
 
-The smoke check makes real Pindo requests. It times speech generation, audio download, transcription, reply selection, and reply audio. Use `--audio your-question.wav --expect "witwa nde"` for a human recording, or `--language en --audio english-question.wav` for English. Add `--output intro.wav` to save a Kinyarwanda spoken clip for the backup rehearsal. Label the clip prerecorded during the demo.
+The smoke check times speech generation, transcription, and replies using the configured providers. Use `--audio your-question.wav --expect "witwa nde"` for a human recording, or `--language en --audio english-question.wav` for English. Add `--output intro.wav` to save a Kinyarwanda spoken clip for the backup rehearsal. Label the clip prerecorded during the demo.
 
 Set `CURRATOR_MODE=mock` for the offline text backup. See [demo acceptance](docs/ACCEPTANCE.md), [the proposed hardware contract](docs/HARDWARE_CONTRACT.md), and [the delivery plan](docs/PLAN_15_DAYS.md).
 
@@ -90,8 +90,7 @@ requests. A public website and web hosting are unnecessary for this setup.
 For a voice turn, the microphone sends a recording to the local server. Pindo transcribes
 Kinyarwanda. English uses the configured local Vosk model or Gemini. Gemini prepares the
 open-ended reply and the app can retrieve Wikimedia evidence for general factual questions.
-The console displays the answer and plays Pindo's Kinyarwanda audio or the browser's English
-voice. The live providers need internet access.
+The console displays the answer and uses the same Currator voice for Kinyarwanda and English. The live providers need internet access.
 
 On the proposed hardware setup, one USB data cable connects the computer to the ESP32.
 The operator's movement controls use a separate channel from conversation. The ESP32 runs the

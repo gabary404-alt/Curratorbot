@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import io
 import mimetypes
 import time
@@ -13,28 +14,20 @@ import httpx
 
 from .config import Settings
 from .knowledge import look_up
-from .speech import safe_audio_url
 
 SAMPLE_TEXT = "Muraho neza!"
 MAX_WAVE_BYTES = 9 * 1024 * 1024
 
 
-def fetch_wave(client: httpx.Client, value: object) -> bytes:
-    url = safe_audio_url(value if isinstance(value, str) else None, "")
-    if not url:
-        raise ValueError("No supported Pindo audio URL was returned")
-    raw = bytearray()
-    with client.stream("GET", url) as response:
-        response.raise_for_status()
-        for chunk in response.iter_bytes():
-            raw.extend(chunk)
-            if len(raw) > MAX_WAVE_BYTES:
-                raise ValueError("Pindo audio is too large")
+def decode_wave(value: object) -> bytes:
+    prefix = "data:audio/wav;base64,"
+    if not isinstance(value, str) or not value.startswith(prefix):
+        raise ValueError("Currator voice unavailable. Check the Gemini API key.")
+    raw = base64.b64decode(value[len(prefix):], validate=True)
     with wave.open(io.BytesIO(raw)) as audio:
-        if audio.getnframes() == 0:
-            raise ValueError("Pindo WAV contains no audio")
-        print(f"Downloaded {audio.getnframes() / audio.getframerate():.2f}s of WAV audio")
-    return bytes(raw)
+        if not audio.getnframes():
+            raise ValueError("Currator WAV contains no audio")
+    return raw
 
 
 def run(args: argparse.Namespace) -> None:
@@ -57,12 +50,11 @@ def run(args: argparse.Namespace) -> None:
 
         def synthesize(text: str) -> bytes:
             response = client.post(base + "/api/speech/synthesize", json={
-                "text": text[:800], "language": "rw",
+                "text": text[:800], "language": args.language,
             })
             response.raise_for_status()
-            stage("Pindo TTS", "Generated a media URL")
-            raw = fetch_wave(client, response.json().get("audio_url"))
-            stage("Pindo media", f"{len(raw)} bytes")
+            raw = decode_wave(response.json().get("audio_url"))
+            stage("Currator voice", f"{len(raw)} bytes")
             return raw
 
         if args.audio:
@@ -93,14 +85,14 @@ def run(args: argparse.Namespace) -> None:
         reply = response.json()
         stage("Chat (prepared)" if reply["simulated"] else "Chat (Gemini)", reply["reply"])
 
-        if args.language == "rw":
+        if args.language in config["speech_output"]:
             audio = synthesize(reply["reply"])
             if args.output:
                 with args.output.open("xb") as output:
                     output.write(audio)
                 print(f"Saved spoken reply to {args.output}")
         else:
-            print("English playback can be checked on the browser's speaker.")
+            print("Add a Gemini key to check Currator’s spoken output.")
 
 
 async def check_sources(query: str, language: str, expected: str | None) -> None:

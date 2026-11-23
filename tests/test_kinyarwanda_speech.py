@@ -3,7 +3,28 @@ import pytest
 
 from currator.config import Settings
 from currator.kinyarwanda import prepare_for_speech
-from currator.speech import transcribe_automatic
+from currator.speech import currator_voice, transcribe_automatic
+
+
+@pytest.mark.asyncio
+async def test_single_voice_model_reads_both_languages():
+    import json
+
+    def handler(request):
+        body = json.loads(request.content)
+        assert request.url.path == "/v1beta/interactions"
+        assert body["model"] == "gemini-3.8-flash-lite-tts"
+        assert body["generation_config"]["speech_config"] == [{"voice": "Zubenelgenubi"}]
+        assert body["input"][0]["content"][0]["text"] in {"Muraho neza!", "Hi there!"}
+        return httpx.Response(200, json={"steps": [{
+            "type": "model_output", "content": [{"type": "audio", "data": "UklGRg=="}],
+        }]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for text in ("Muraho neza!", "Hi there!"):
+            assert (await currator_voice(text, Settings(gemini_api_key="test"), client)).startswith(
+                "data:audio/wav;base64,"
+            )
 
 
 def test_speech_punctuation_preserves_elision_and_question_intonation():
@@ -37,5 +58,5 @@ async def test_auto_speech_uses_specialist_and_flags_disagreement(detected, pind
         result = await transcribe_automatic(
             b"sample", "audio/webm", "audio/webm", Settings(gemini_api_key="test"), client,
         )
-    assert result == expected
+    assert result == (*expected, detected)
     assert ("api.pindo.io" in hits) == (detected == "rw")

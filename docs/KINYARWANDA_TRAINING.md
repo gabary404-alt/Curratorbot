@@ -2,8 +2,8 @@
 
 Currator uses instruction tuning at inference time through a language guide and original
 examples. The introduction of a second recognizer does not update Gemini or Pindo model weights.
-The app displays an editable transcript when the recognizers disagree or Gemini flags unclear
-speech. Mixed-language speech stays with the multilingual recognizer.
+When the recognizers disagree substantially, differ on some critical words, or Gemini flags
+unclear speech, the app asks the speaker to repeat the question. Mixed-language speech stays with the multilingual recognizer.
 
 ## Teaching references
 
