@@ -22,6 +22,7 @@ class ChatRequest(BaseModel):
     retrieval: Literal["auto", "on", "off"] = "auto"
     history: list[ChatTurn] | None = Field(default=None, max_length=6)
     include_audio: bool = False
+    latency_budget_ms: int | None = Field(default=None, ge=500, le=15_000)
 
 
 class Source(BaseModel):

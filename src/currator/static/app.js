@@ -19,6 +19,7 @@ const history = [];
 let lastSpeechLanguage = null;
 const END_OF_TURN_MS = 900;
 const AUDIO_CHECK_MS = 50;
+const TURN_LIMIT_MS = 15000;
 
 function bubble(text, kind = 'bot', lang) {
   const entry = document.createElement('div');
@@ -203,11 +204,12 @@ function appendSources(sources) {
   conversation.scrollTop = conversation.scrollHeight;
 }
 
-async function requestReply(body, onProgress) {
+async function requestReply(body, onProgress, signal) {
   const response = await fetch('/api/chat', {
     method: 'POST',
     headers: {'Content-Type': 'application/json', Accept: 'application/x-ndjson'},
     body: JSON.stringify(body),
+    signal,
   });
   if (!response.ok || !response.headers?.get('content-type')?.includes('application/x-ndjson')) {
     const result = await response.json();
@@ -239,7 +241,7 @@ async function requestReply(body, onProgress) {
   }
 }
 
-async function ask(text, lang) {
+async function ask(text, lang, deadline = performance.now() + TURN_LIMIT_MS) {
   stopSpeech();
   bubble(text, 'user', lang === 'auto' ? undefined : lang);
   const progress = document.createElement('div');
@@ -256,11 +258,16 @@ async function ask(text, lang) {
     conversation.scrollTop = conversation.scrollHeight;
   };
   updateProgress('thinking');
+  const controller = new AbortController();
+  const remaining = Math.floor(deadline - performance.now());
+  const timer = setTimeout(() => controller.abort(), Math.max(0, remaining));
   try {
+    if (remaining < 900) throw new Error('This turn took too long. Please try again.');
     const result = await requestReply({
       text, language: lang, session_id: sessionId, retrieval: $('retrieval').value, history,
       include_audio: config.speech_output.length > 0,
-    }, updateProgress);
+      latency_budget_ms: Math.max(500, remaining - 650),
+    }, updateProgress, controller.signal);
     progress.remove();
     if (config.mode === 'live' && !['live_unavailable', 'source_unavailable'].includes(result.source_mode)) {
       history.push({role: 'user', text}, {role: 'model', text: result.reply.slice(0, 1500)});
@@ -290,8 +297,11 @@ async function ask(text, lang) {
     }
   } catch (error) {
     progress.remove();
-    bubble('Could not answer. ' + error.message);
+    bubble(error.name === 'AbortError' ? 'That took too long. Try again or ask a shorter question.' :
+      'Could not answer. ' + error.message);
     setPhase('idle', 'Please try again.');
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -316,9 +326,10 @@ function closeRecording(capture) {
   if (recording === capture) recording = null;
 }
 
-function finishTurn(capture) {
+function finishTurn(capture, endedAt = performance.now()) {
   if (recording !== capture || capture.recorder.state !== 'recording') return;
   setPhase('transcribing', 'Finishing recording…');
+  capture.deadline = endedAt + TURN_LIMIT_MS;
   capture.stopMonitoring?.();
   capture.recorder.stop();
 }
@@ -354,7 +365,7 @@ function watchForPause(capture) {
         floor = Math.max(0.002, floor * 0.9 + rms * 0.1);
         voicedMs = 0;
       } else if (now - lastVoice >= END_OF_TURN_MS) {
-        finishTurn(capture);
+        finishTurn(capture, lastVoice);
       }
     }, AUDIO_CHECK_MS);
     capture.stopMonitoring = () => {
@@ -382,11 +393,16 @@ async function transcribe(capture) {
   const suffix = blob.type.includes('mp4') ? 'mp4' : blob.type.includes('ogg') ? 'ogg' : 'webm';
   form.append('audio', blob, 'question.' + suffix);
   setPhase('transcribing', 'Transcribing…');
+  const deadline = capture.deadline ?? performance.now() + TURN_LIMIT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(0, Math.min(
+    6500, deadline - performance.now() - 2500,
+  )));
   try {
     const speechQuery = '/api/speech/transcribe?language=' + capture.lang +
       (capture.lang === 'auto' && lastSpeechLanguage === 'rw' ? '&language_hint=rw' : '');
     const result = await api(speechQuery, {
-      method: 'POST', body: form,
+      method: 'POST', body: form, signal: controller.signal,
     });
     lastSpeechLanguage = result.detected_language || null;
     if (result.needs_confirmation) {
@@ -398,10 +414,13 @@ async function transcribe(capture) {
       void speak(message, lang, reply);
       return;
     }
-    await ask(result.text, capture.lang);
+    await ask(result.text, capture.lang, deadline);
   } catch (error) {
-    bubble('Speech recognition: ' + error.message);
+    bubble(error.name === 'AbortError' ? 'I couldn’t finish listening in time. Say it again or type your question.' :
+      'Speech recognition: ' + error.message);
     setPhase('idle', 'Try the microphone again or type a question.');
+  } finally {
+    clearTimeout(timer);
   }
 }
 

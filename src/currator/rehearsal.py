@@ -30,6 +30,30 @@ INTENTS = {
 }
 
 
+def quick_reply(text: str, language: str) -> tuple[str, Language] | None:
+    """Answer standalone greetings, thanks, and introductions without a network call."""
+    normalized = " ".join(re.findall(r"\w+", unicodedata.normalize("NFKC", text).casefold()))
+    phrases = {
+        "rw": {
+            "hello": ("muraho", "muraho neza", "mwaramutse", "mwiriwe"),
+            "name": ("witwa nde", "muraho witwa nde", "muraho neza witwa nde"),
+            "thanks": ("urakoze", "murakoze", "murakoze cyane"),
+        },
+        "en": {
+            "hello": ("hello", "hi", "hey"),
+            "name": ("what s your name", "what is your name", "who are you"),
+            "thanks": ("thanks", "thank you", "thank you very much"),
+        },
+    }
+    for selected in ("rw", "en"):
+        if language not in ("auto", selected):
+            continue
+        for intent, variants in phrases[selected].items():
+            if normalized in variants:
+                return REPLIES[selected][intent], selected
+    return None
+
+
 def rehearsal_reply(text: str, language: Language) -> str:
     normalized = " ".join(re.findall(r"\w+", unicodedata.normalize("NFKC", text).casefold()))
     for intent in ("name", "can", "thanks", "hello"):

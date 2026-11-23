@@ -22,7 +22,7 @@ from .english import LocalEnglishSpeech
 from .knowledge import look_up, needs_current_info, needs_wikipedia, news_lookup
 from .models import (ChatRequest, ChatResponse, Language, RobotCommand, RobotResult,
                      SensorTelemetry, TranscriptionResponse)
-from .rehearsal import rehearsal_reply
+from .rehearsal import REPLIES, quick_reply, rehearsal_reply
 from .robot import RobotBridge
 from .speech import (
     PindoSpeech, UpstreamFailure, currator_voice, transcribe_automatic, transcribe_english_gemini,
@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):
         app.state.client = client
         app.state.robot = RobotBridge(settings)
         app.state.sessions = {}
+        app.state.greeting_audio = {}
         app.state.english = (
             await asyncio.to_thread(LocalEnglishSpeech, settings.vosk_model_path)
             if settings.vosk_model_path and settings.mode != "mock"
@@ -125,17 +126,37 @@ async def chat(request: ChatRequest, accept: str = Header(default="")):
 
 
 async def prepare_chat(request: ChatRequest, progress=None):
-    reply = await answer_chat(request, progress)
+    started = time.monotonic()
+    budget = request.latency_budget_ms / 1000 if request.latency_budget_ms else None
+    try:
+        reply = await asyncio.wait_for(
+            answer_chat(request, progress), timeout=min(11, budget) if budget else None,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="This question took too long. Try a shorter question or ask again.",
+        ) from exc
     if (not request.include_audio or not settings.gemini_api_key
             or settings.mode == "mock" or reply.language not in {"rw", "en"}):
+        return reply
+    # These six fixed replies contain no visitor content and have stable pronunciations.
+    cacheable = reply.reply in {REPLIES[reply.language][intent] for intent in ("hello", "name", "thanks")}
+    if cacheable and reply.reply in app.state.greeting_audio:
+        reply.audio_url = app.state.greeting_audio[reply.reply]
         return reply
     if progress is not None:
         progress("preparing")
     try:
         # Keep synthesized audio in the same response and release text if voice is slow.
+        remaining = min(4.5, budget - (time.monotonic() - started)) if budget else 8
+        if remaining <= 0:
+            raise TimeoutError
         reply.audio_url = await asyncio.wait_for(
-            currator_voice(reply.reply[:800], settings, app.state.client), timeout=8,
+            currator_voice(reply.reply[:800], settings, app.state.client), timeout=remaining,
         )
+        if cacheable and reply.audio_url and len(reply.audio_url) <= 500_000:
+            app.state.greeting_audio[reply.reply] = reply.audio_url
     except (TimeoutError, UpstreamFailure):
         reply.audio_error = "Voice is taking longer than usual. Tap Play reply to try again."
     return reply
@@ -190,7 +211,11 @@ async def answer_chat(request: ChatRequest, progress=None):
     brain = GeminiBrain(settings, app.state.client)
     query = request.text
     direct_reply = ""
-    if request.language == "auto":
+    quick = quick_reply(request.text, request.language) if request.retrieval != "on" else None
+    if quick:
+        direct_reply, language = quick
+        uses_search = wikipedia = False
+    elif request.language == "auto":
         try:
             plan = await brain.plan(request.text, history, request.retrieval)
         except UpstreamFailure as exc:
@@ -202,7 +227,7 @@ async def answer_chat(request: ChatRequest, progress=None):
             request.retrieval == "on"
             or (request.retrieval == "auto" and plan.route == "reference")
         )
-        if not (uses_search or wikipedia):
+        if plan.route == "answer" and not (uses_search or wikipedia):
             direct_reply = plan.reply.strip()
     extra_info, sources = "", []
     if uses_search or wikipedia:

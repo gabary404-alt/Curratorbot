@@ -41,7 +41,7 @@ Never provide motor control commands: physical motion is handled by a separate s
 
 class ReplyPlan(BaseModel):
     language: ReplyLanguage
-    route: Literal["answer", "reference", "news"]
+    route: Literal["answer", "reason", "reference", "news"]
     query: str = Field(max_length=180)
     reply: str = Field(max_length=4000)
 
@@ -75,6 +75,8 @@ class GeminiBrain:
         if use_google:
             body["tools"] = [{"google_search": {}}]
         if response_schema:
+            if self.settings.gemini_model in {"gemini-3.1-flash-lite", "gemini-3.5-flash-lite"}:
+                body["generationConfig"]["thinkingConfig"]["thinkingLevel"] = "MINIMAL"
             # Keep the provider schema to basic types and enums. Pydantic enforces bounds locally.
             for properties in response_schema.get("properties", {}).values():
                 for key in ("maxLength", "pattern", "title"):
@@ -119,14 +121,15 @@ class GeminiBrain:
             "requested reply language, otherwise the main language of the latest request. "
             "Use recent conversation for short follow-ups. Output the ISO language code in "
             "lowercase (rw for Kinyarwanda). Choose answer for reasoning, creative tasks, "
-            "and stable facts you know confidently; reference for claims requiring a source "
+            "and stable facts you know confidently. Choose reason for questions requiring "
+            "substantial reasoning or several steps. Choose reference for claims requiring a source "
             "or unfamiliar stable facts; news for time-sensitive facts. Current officeholders, "
             "recent events, live prices, business hours, and current local information need "
             "fresh sources even if the visitor does not ask you to search. For retrieval, "
             "return a concise search query with resolved names and locations, in English "
             "where useful. For the answer route give the final spoken reply in reply, "
             "otherwise leave reply empty. If research is forced choose reference or news. "
-            "If retrieval is off choose answer and state when a claim would need verification. "
+            "If retrieval is off choose answer or reason and say when verification is needed. "
             f"Retrieval preference: {retrieval}.\n"
             "Preserve a topic's country and date qualifiers in the search query.\n"
             f"Visitor message:\n{text}"
