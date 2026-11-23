@@ -27,7 +27,12 @@ Set `CURRATOR_MODE=rehearsal` in `.env`, then start the server.
 python -m uvicorn currator.main:app --host 127.0.0.1 --port 8000
 ```
 
-Open [the console](http://127.0.0.1:8000/) in a browser. Choose Kinyarwanda, tap the microphone, say **“Witwa nde?”**, and tap again. The page shows the transcript and plays the prepared reply in Pindo's voice. Try **“Muraho”**, **“Ukora iki?”**, or **“Urakoze”** next. For English, select English and type **“What's your name?”**. Check the browser's installed English voice and speaker volume.
+Open [the console](http://127.0.0.1:8000/) in a browser. Choose Kinyarwanda, tap the
+microphone, say **“Witwa nde?”**, and pause. A pause of about a second ends the turn
+on supported browsers. You can also tap again to send. The page shows the transcript
+and plays the prepared reply in Pindo's voice. Try **“Muraho”**, **“Ukora iki?”**, or
+**“Urakoze”** next. For English, select English and type **“What's your name?”**.
+Check the browser's installed English voice and speaker volume.
 
 Pindo's public endpoints require internet access and are rate-limited by IP. Rehearsal uses no API key. The robot's movement controls are separate from this screen.
 

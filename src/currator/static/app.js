@@ -16,6 +16,8 @@ let phase = 'idle';
 let recording = null;
 let speech = null;
 const history = [];
+const END_OF_TURN_MS = 900;
+const AUDIO_CHECK_MS = 50;
 
 function bubble(text, kind = 'bot', lang) {
   const entry = document.createElement('div');
@@ -49,7 +51,7 @@ function readyMessage() {
   if (config.mode === 'mock') return 'Type a question to try the offline demonstration.';
   if (!config.speech_input.includes(language.value)) return 'Type an English question during rehearsal.';
   if (record.disabled) return 'Microphone unavailable. Use localhost or HTTPS, or type a question.';
-  return 'Tap the microphone to record. Tap again to send.';
+  return 'Tap the microphone, speak, then pause for a reply.';
 }
 
 async function api(path, options = {}) {
@@ -249,8 +251,64 @@ language.addEventListener('change', () => {
 
 function closeRecording(capture) {
   clearTimeout(capture.timer);
+  capture.stopMonitoring?.();
   capture.stream.getTracks().forEach(track => track.stop());
   if (recording === capture) recording = null;
+}
+
+function finishTurn(capture) {
+  if (recording !== capture || capture.recorder.state !== 'recording') return;
+  setPhase('transcribing', 'Finishing recording…');
+  capture.stopMonitoring?.();
+  capture.recorder.stop();
+}
+
+function watchForPause(capture) {
+  const AudioContext = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContext) return false;
+
+  let context;
+  try {
+    context = new AudioContext();
+    const source = context.createMediaStreamSource(capture.stream);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    const started = performance.now();
+    let floor = 0.004;
+    let voicedMs = 0;
+    let lastVoice = started;
+    let heardVoice = false;
+    const timer = setInterval(() => {
+      if (context.state !== 'running') return;
+      analyser.getFloatTimeDomainData(samples);
+      const rms = Math.sqrt(samples.reduce((energy, value) => energy + value * value, 0) / samples.length);
+      const now = performance.now();
+      const threshold = Math.max(0.012, floor * 2.5);
+      if (rms >= threshold) {
+        voicedMs += AUDIO_CHECK_MS;
+        lastVoice = now;
+        heardVoice ||= voicedMs >= 200;
+      } else if (!heardVoice) {
+        floor = Math.max(0.002, floor * 0.9 + rms * 0.1);
+        voicedMs = 0;
+      } else if (now - lastVoice >= END_OF_TURN_MS) {
+        finishTurn(capture);
+      }
+    }, AUDIO_CHECK_MS);
+    capture.stopMonitoring = () => {
+      capture.stopMonitoring = null;
+      clearInterval(timer);
+      source.disconnect();
+      void context.close().catch(() => {});
+    };
+    void context.resume().catch(() => capture.stopMonitoring?.());
+    return true;
+  } catch {
+    if (context) void context.close().catch(() => {});
+    return false;
+  }
 }
 
 async function transcribe(capture) {
@@ -283,8 +341,7 @@ async function transcribe(capture) {
 
 record.addEventListener('click', async () => {
   if (phase === 'recording' && recording?.recorder.state === 'recording') {
-    setPhase('transcribing', 'Finishing recording…');
-    recording.recorder.stop();
+    finishTurn(recording);
     return;
   }
   if (!config || phase !== 'idle' || record.disabled) return;
@@ -312,10 +369,12 @@ record.addEventListener('click', async () => {
       setPhase('idle', 'Recording failed. Try the microphone again.');
     };
     recorder.start();
-    setPhase('recording', 'Recording… Tap again to send, or wait 15 seconds.');
+    const autoEnd = watchForPause(capture);
+    setPhase('recording', autoEnd ?
+      'Listening… Pause to send, or tap again.' : 'Recording… Tap again to send.');
     capture.timer = setTimeout(() => {
-      if (recorder.state === 'recording') recorder.stop();
-    }, 15000);
+      finishTurn(capture);
+    }, 30000);
   } catch (error) {
     if (recording && recording.stream === stream) closeRecording(recording);
     else stream?.getTracks().forEach(track => track.stop());

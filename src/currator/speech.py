@@ -13,7 +13,7 @@ import httpx
 from pydantic import BaseModel
 
 from .config import Settings
-from .kinyarwanda import LISTENING_GUIDANCE
+from .kinyarwanda import LISTENING_GUIDANCE, prepare_for_speech
 
 PINDO_ROOT = "https://api.pindo.io/ai"
 ALLOWED_MEDIA_HOSTS = {
@@ -171,7 +171,10 @@ class PindoSpeech:
             raise UpstreamFailure("Kinyarwanda speech recognition unavailable") from exc
 
     async def speak(self, text: str) -> str | None:
-        body: dict[str, str | float] = {"text": text[:800], "speech_rate": 1.0}
+        body: dict[str, str | float] = {
+            "text": prepare_for_speech(text)[:800],
+            "speech_rate": 0.96 if self.settings.mode == "live" else 1.0,
+        }
         if self.settings.pindo_token:
             body["lang"] = "rw"
         try:

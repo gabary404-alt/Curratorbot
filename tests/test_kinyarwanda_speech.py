@@ -2,7 +2,14 @@ import httpx
 import pytest
 
 from currator.config import Settings
+from currator.kinyarwanda import prepare_for_speech
 from currator.speech import transcribe_automatic
+
+
+def test_speech_punctuation_preserves_elision_and_question_intonation():
+    assert prepare_for_speech("Yego , ndabyumva; ni iby’u Rwanda. Urumva ??") == (
+        "Yego, ndabyumva. ni iby'u Rwanda. Urumva?"
+    )
 
 
 @pytest.mark.asyncio
