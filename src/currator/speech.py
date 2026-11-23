@@ -12,6 +12,7 @@ import httpx
 from pydantic import BaseModel
 
 from .config import Settings
+from .gemini_http import failure_message, generate, logger
 from .kinyarwanda import LISTENING_GUIDANCE, prepare_for_speech
 
 PINDO_ROOT = "https://api.pindo.io/ai"
@@ -99,7 +100,7 @@ async def currator_voice(text: str, settings: Settings, client: httpx.AsyncClien
             raise ValueError("Invalid WAV")
         return "data:audio/wav;base64," + raw
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-        raise UpstreamFailure("Currator's voice is unavailable. Try playing the reply again.") from exc
+        raise UpstreamFailure("Nshuti's voice is unavailable. Try playing the reply again.") from exc
 
 
 def _read_data(payload: object) -> dict:
@@ -231,13 +232,15 @@ async def transcribe_english_gemini(
             responseJsonSchema=DetectedSpeech.model_json_schema(),
         )
     try:
-        resp = await client.post(
-            endpoint, json=body, headers={"x-goog-api-key": settings.gemini_api_key},
-            timeout=35,
+        resp = await generate(
+            client, endpoint, body=body, key=settings.gemini_api_key,
+            operation="speech recognition", timeout=14,
         )
-        resp.raise_for_status()
         candidates = resp.json().get("candidates", [])
-        parts = candidates[0]["content"]["parts"] if candidates else []
+        parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
         return " ".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
-    except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
-        raise UpstreamFailure("Speech recognition unavailable") from exc
+    except httpx.HTTPError as exc:
+        raise UpstreamFailure(failure_message(exc, "speech recognition")) from exc
+    except (KeyError, IndexError, ValueError, TypeError, AttributeError) as exc:
+        logger.warning("Gemini speech unreadable response error=%s", type(exc).__name__)
+        raise UpstreamFailure("Gemini returned an unreadable transcript. Please try again.") from exc

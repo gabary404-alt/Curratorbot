@@ -23,7 +23,7 @@ def test_rehearsal_bilingual_prepared_replies(rehearsal):
         reply = rehearsal.post("/api/chat", json={"text": text, "language": language}).json()
         assert reply["simulated"] is True
         assert reply["source_mode"] == "rehearsal"
-        assert "Currator" in reply["reply"]
+        assert "Nshuti" in reply["reply"]
 
 
 def test_rehearsal_transcribes_without_a_voice_key(rehearsal):

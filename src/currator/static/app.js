@@ -161,7 +161,7 @@ async function speak(text, lang, entry, audioUrl = null) {
       if (speech !== active) return;
       audioUrl = data.audio_url;
     }
-    if (!audioUrl) throw new Error('Currator’s voice is temporarily unavailable.');
+    if (!audioUrl) throw new Error('Nshuti’s voice is temporarily unavailable.');
     active.player = new Audio(audioUrl);
     active.player.onplaying = started;
     active.player.onended = () => finish();

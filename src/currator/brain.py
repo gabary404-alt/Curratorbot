@@ -7,11 +7,14 @@ import httpx
 from pydantic import BaseModel, Field
 
 from .config import Settings
+from .gemini_http import failure_message, generate, logger
 from .kinyarwanda import SPEAKING_GUIDANCE
 from .models import ReplyLanguage, Source
 from .speech import UpstreamFailure
 
-PERSONA = """You are Currator, a friendly conversational robot presenting in Rwanda.
+PERSONA = """You are Nshuti, a friendly conversational robot presenting in Rwanda.
+Currator Bot is the project name. Introduce yourself as Nshuti, even if older conversation
+history or a visitor calls you Currator.
 Primary language is Kinyarwanda; answer in Kinyarwanda when language=rw and English when en.
 Speak like a relaxed, friendly teammate. Use everyday expressions, natural contractions
 in English, and short clauses with room to breathe. Answer directly in one or two short sentences.
@@ -74,11 +77,10 @@ class GeminiBrain:
                 responseMimeType="application/json", responseJsonSchema=response_schema,
             )
         try:
-            resp = await self.client.post(
-                url, json=body,
-                headers={"x-goog-api-key": self.settings.gemini_api_key}, timeout=30,
+            resp = await generate(
+                self.client, url, body=body, key=self.settings.gemini_api_key,
+                operation="chat", timeout=14,
             )
-            resp.raise_for_status()
             candidates = resp.json().get("candidates", [])
             if not candidates:
                 raise UpstreamFailure("No Gemini response received")
@@ -98,11 +100,12 @@ class GeminiBrain:
             status = exc.response.status_code
             if status in (400, 403) and use_google:
                 raise UpstreamFailure("Google Search grounding not enabled for this free-tier model") from exc
-            if status == 429:
-                raise UpstreamFailure("Gemini free-tier quota or rate limit reached") from exc
-            raise UpstreamFailure(f"Gemini HTTP request failed ({status})") from exc
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
-            raise UpstreamFailure("Gemini temporarily unavailable") from exc
+            raise UpstreamFailure(failure_message(exc, "chat")) from exc
+        except httpx.HTTPError as exc:
+            raise UpstreamFailure(failure_message(exc, "chat")) from exc
+        except (ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
+            logger.warning("Gemini chat unreadable response error=%s", type(exc).__name__)
+            raise UpstreamFailure("Gemini returned an unreadable reply. Please try again.") from exc
 
     async def plan(self, text: str, history: list[dict], retrieval: str) -> ReplyPlan:
         prompt = (
@@ -134,9 +137,9 @@ class GeminiBrain:
 def mock_reply(text: str, language: str) -> str:
     t = text.lower()
     if "witwa" in t or "name" in t:
-        return ("Nitwa Currator, ndi robot ifasha abantu gusubiza ibibazo!"
+        return ("Nitwa Nshuti, ndi robot ifasha abantu gusubiza ibibazo!"
                 if language == "rw" else
-                "I'm Currator, a friendly robot assistant. Nice to meet you!")
+                "I'm Nshuti, a friendly robot assistant. Nice to meet you!")
     if "muraho" in t or "hello" in t or "hi" == t:
         return ("Muraho neza! Nishimiye kuganira nawe."
                 if language == "rw" else "Hello! Great to meet you. What would you like to know?")

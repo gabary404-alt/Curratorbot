@@ -9,14 +9,14 @@ from .models import Language
 REPLIES = {
     "rw": {
         "hello": "Muraho neza! Nishimiye kuganira nawe.",
-        "name": "Nitwa Currator. Ndi roboti ishobora kuganira nawe mu Kinyarwanda no mu Cyongereza.",
+        "name": "Nitwa Nshuti. Ndi roboti ishobora kuganira nawe mu Kinyarwanda no mu Cyongereza.",
         "can": "Ubu ndi mu myitozo. Nshobora kumva no kuvuga mu Kinyarwanda.",
         "thanks": "Urakoze nawe!",
         "fallback": "Ubu ndi mu myitozo. Gerageza kumbaza uti: Witwa nde?",
     },
     "en": {
         "hello": "Hello! I'm glad to meet you.",
-        "name": "My name is Currator. I'm a robot assistant for Kinyarwanda and English.",
+        "name": "My name is Nshuti. I'm a robot assistant for Kinyarwanda and English.",
         "can": "I'm in rehearsal mode. You can ask my name, greet me, or ask what I can do.",
         "thanks": "You're welcome!",
         "fallback": "I'm using prepared answers for this rehearsal. Try asking, What's your name?",

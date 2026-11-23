@@ -82,7 +82,7 @@ def speech_input_languages() -> list[str]:
 @app.get("/api/status")
 async def status():
     return {
-        "name": "Currator Bot", "mode": settings.mode, "languages": ["rw", "en"],
+        "name": "Nshuti", "project": "Currator Bot", "mode": settings.mode, "languages": ["rw", "en"],
         "voice_live": settings.mode != "mock",
         "speech_input": speech_input_languages(),
         "speech_output": ["rw", "en"] if settings.mode != "mock" and settings.gemini_api_key else [],
