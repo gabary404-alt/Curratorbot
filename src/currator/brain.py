@@ -87,7 +87,7 @@ class GeminiBrain:
         try:
             resp = await generate(
                 self.client, url, body=body, key=self.settings.gemini_api_key,
-                operation="chat", timeout=14,
+                operation="chat", timeout=25,
             )
             candidates = resp.json().get("candidates", [])
             if not candidates:

@@ -8,6 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
@@ -20,7 +21,7 @@ from .brain import GeminiBrain, mock_reply
 from .config import HOSTED, Settings
 from .english import LocalEnglishSpeech
 from .knowledge import look_up, needs_current_info, needs_wikipedia, news_lookup
-from .models import (ChatRequest, ChatResponse, Language, RobotCommand, RobotResult,
+from .models import (ChatRequest, ChatResponse, Language, RobotCommand, RobotResult, Source,
                      SensorTelemetry, TranscriptionResponse)
 from .rehearsal import REPLIES, quick_reply, rehearsal_reply
 from .robot import RobotBridge
@@ -149,7 +150,7 @@ async def prepare_chat(request: ChatRequest, progress=None):
         progress("preparing")
     try:
         # Keep synthesized audio in the same response and release text if voice is slow.
-        remaining = min(4.5, budget - (time.monotonic() - started)) if budget else 8
+        remaining = min(4.5, budget - (time.monotonic() - started)) if budget else 12
         if remaining <= 0:
             raise TimeoutError
         reply.audio_url = await asyncio.wait_for(
@@ -258,12 +259,18 @@ async def answer_chat(request: ChatRequest, progress=None):
             raise UpstreamFailure("Gemini returned no grounded sources")
     except UpstreamFailure as exc:
         # Do not silently fall back to an ungrounded answer for a live-info question.
-        if uses_search:
+        if uses_search and (not sources or use_google):
             reply = ("Sinshoboye kubona amakuru agezweho ubu. Ongera ugerageze."
                      if language == "rw" else
-                     "I can't verify live information right now. Please try again.")
+                     "I couldn't confirm that from a current source. You can check the search link below.")
+            search = "https://www.google.com/search?" + urlencode({"q": query[:180]})
             return ChatResponse(reply=reply, language=language,
-                                source_mode="live_unavailable")
+                                source_mode="live_unavailable",
+                                sources=[Source(
+                                    label="Shakisha kuri Google" if language == "rw" else
+                                    "Check on Google",
+                                    url=search,
+                                )])
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     # Store bounded session history without permanent persistence.
     if request.history is None and not HOSTED:

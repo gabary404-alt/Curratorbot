@@ -125,11 +125,9 @@ async def news_lookup(query: str, client: httpx.AsyncClient):
             sources.append(Source(label=f"{parsed.hostname}: {title[:140]}", url=url))
         return "\n".join(evidence), sources
 
-    async def google_news():
+    async def rss_news(endpoint, allowed_hosts, *, params=None, required_terms=()):
         async with client.stream(
-            "GET", "https://news.google.com/rss/search",
-            params={"q": f"{' '.join(keywords[:5]) or 'Rwanda'} when:7d",
-                    "hl": "en", "gl": "RW", "ceid": "RW:en"},
+            "GET", endpoint, params=params,
             follow_redirects=True,
         ) as response:
             response.raise_for_status()
@@ -144,10 +142,13 @@ async def news_lookup(query: str, client: httpx.AsyncClient):
             return "", []
         evidence, sources = [], []
         now = datetime.now(timezone.utc)
-        for item in root.findall("./channel/item"):
+        for item in root.findall("./channel/item")[:70]:
             url = item.findtext("link", "")
             title = item.findtext("title", "").strip()
-            if not title or not url.startswith("https://news.google.com/rss/articles/"):
+            link = urlsplit(url)
+            title_words = set(re.findall(r"[^\W_]+", title.casefold()))
+            if (not title or link.scheme != "https" or link.hostname not in allowed_hosts
+                    or any(term not in title_words for term in required_terms)):
                 continue
             date = item.findtext("pubDate", "")[:40]
             try:
@@ -162,8 +163,37 @@ async def news_lookup(query: str, client: httpx.AsyncClient):
                 break
         return "\n".join(evidence), sources
 
-    reports = await asyncio.gather(_bounded_lookup(fetch()), _bounded_lookup(google_news()))
-    return next((report for report in reports if report and report[1]), ("", []))
+    providers = [
+        fetch(),
+        rss_news(
+            "https://news.google.com/rss/search", {"news.google.com"},
+            params={"q": f"{' '.join(keywords[:5]) or 'Rwanda'} when:7d",
+                    "hl": "en", "gl": "RW", "ceid": "RW:en"},
+        ),
+    ]
+    local = {"rwanda", "rwandan", "kigali"}
+    broad = {"headlines", "breaking", "recent", "amakuru", "rw", "national", "top"}
+    if not keywords or local.intersection(keywords):
+        required = [word for word in keywords if word not in local | broad]
+        if "kigali" in keywords and not {"rwanda", "rwandan"}.intersection(keywords):
+            required.append("kigali")
+        providers.append(rss_news(
+            "https://www.ktpress.rw/feed/", {"www.ktpress.rw", "ktpress.rw"},
+            required_terms=required,
+        ))
+
+    tasks = [asyncio.create_task(_bounded_lookup(provider)) for provider in providers]
+    try:
+        for task in asyncio.as_completed(tasks):
+            result = await task
+            if result and result[1]:
+                return result
+        return "", []
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def needs_wikipedia(text: str) -> bool:

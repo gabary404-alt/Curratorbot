@@ -247,7 +247,7 @@ async def transcribe_english_gemini(
     try:
         resp = await generate(
             client, endpoint, body=body, key=settings.gemini_api_key,
-            operation="speech recognition", timeout=14,
+            operation="speech recognition", timeout=24,
         )
         candidates = resp.json().get("candidates", [])
         parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
