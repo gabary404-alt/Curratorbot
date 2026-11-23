@@ -4,12 +4,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import re
 import wave
+from typing import Literal
 from urllib.parse import urljoin, urlsplit
 
 import httpx
+from pydantic import BaseModel
 
 from .config import Settings
+from .kinyarwanda import LISTENING_GUIDANCE
 
 PINDO_ROOT = "https://api.pindo.io/ai"
 ALLOWED_MEDIA_HOSTS = {
@@ -20,6 +24,35 @@ ALLOWED_MEDIA_HOSTS = {
 
 class UpstreamFailure(RuntimeError):
     pass
+
+
+class DetectedSpeech(BaseModel):
+    text: str
+    language: Literal["rw", "mixed", "other"]
+    unclear: bool
+
+
+async def transcribe_automatic(
+    raw: bytes, mime: str, gemini_mime: str, settings: Settings, client: httpx.AsyncClient,
+) -> tuple[str, bool]:
+    result = await transcribe_english_gemini(raw, gemini_mime, settings, client, automatic=True)
+    try:
+        detected = DetectedSpeech.model_validate_json(result)
+    except ValueError as exc:
+        raise UpstreamFailure("Speech detection couldn't verify the recording. Try again.") from exc
+    original = detected.text.strip()
+    if not original or detected.language != "rw":
+        return original, detected.unclear
+    try:
+        specialist = await asyncio.wait_for(PindoSpeech(settings, client).transcribe(raw, mime), 7)
+    except (TimeoutError, UpstreamFailure):
+        return original, detected.unclear
+    if not specialist:
+        return original, detected.unclear
+    a = re.findall(r"\w+", original.casefold())
+    b = re.findall(r"\w+", specialist.casefold())
+    differs = a != b
+    return specialist, detected.unclear or differs
 
 
 async def casual_english_audio(text: str, settings: Settings, client: httpx.AsyncClient) -> str | None:
@@ -174,15 +207,18 @@ async def transcribe_english_gemini(
     body = {
         "contents": [{"parts": [
             {"text": (
-                "Transcribe this speech verbatim in its original languages, including "
-                "Kinyarwanda and language switches. Do not translate or answer the speaker. "
-                "Return only the transcript, or empty text if there is no intelligible speech."
+                LISTENING_GUIDANCE
                 if automatic else "Transcribe this English speech verbatim. Return ONLY the transcript."
             )},
             {"inline_data": {"mime_type": mime, "data": audio}},
         ]}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 350},
     }
+    if automatic:
+        body["generationConfig"].update(
+            responseMimeType="application/json",
+            responseJsonSchema=DetectedSpeech.model_json_schema(),
+        )
     try:
         resp = await client.post(
             endpoint, json=body, headers={"x-goog-api-key": settings.gemini_api_key},

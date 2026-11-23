@@ -24,7 +24,9 @@ from .models import (ChatRequest, ChatResponse, Language, RobotCommand, RobotRes
                      SensorTelemetry, TranscriptionResponse)
 from .rehearsal import REPLIES, rehearsal_reply
 from .robot import RobotBridge
-from .speech import PindoSpeech, UpstreamFailure, casual_english_audio, transcribe_english_gemini
+from .speech import (
+    PindoSpeech, UpstreamFailure, casual_english_audio, transcribe_automatic, transcribe_english_gemini,
+)
 
 settings = Settings()
 settings.validate()
@@ -218,6 +220,7 @@ async def transcribe(language: str = "rw", audio: UploadFile = File(...)):
             raise HTTPException(status_code=422, detail="Recording is empty")
         if len(raw) > MAX_AUDIO_SIZE:
             raise HTTPException(status_code=413, detail="Recording is too large")
+        confirmation = False
         if language == "rw":
             transcript = await PindoSpeech(settings, app.state.client).transcribe(raw, content_type)
         elif language == "en" and app.state.english:
@@ -226,13 +229,18 @@ async def transcribe(language: str = "rw", audio: UploadFile = File(...)):
             gemini_mime = {
                 "audio/mp4": "audio/m4a", "audio/x-m4a": "audio/m4a", "audio/x-wav": "audio/wav",
             }.get(content_type, content_type)
-            transcript = await transcribe_english_gemini(
-                raw, gemini_mime, settings, app.state.client,
-                **({"automatic": True} if language == "auto" else {}),
-            )
+            if language == "auto":
+                transcript, confirmation = await transcribe_automatic(
+                    raw, content_type, gemini_mime, settings, app.state.client,
+                )
+            else:
+                transcript = await transcribe_english_gemini(
+                    raw, gemini_mime, settings, app.state.client,
+                )
         if not transcript:
             raise HTTPException(status_code=422, detail="No speech recognized")
-        return TranscriptionResponse(text=transcript, language=language)
+        return TranscriptionResponse(text=transcript, language=language,
+                                     needs_confirmation=confirmation)
     except UpstreamFailure as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:

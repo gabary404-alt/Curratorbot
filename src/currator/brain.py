@@ -7,6 +7,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from .config import Settings
+from .kinyarwanda import SPEAKING_GUIDANCE
 from .models import ReplyLanguage, Source
 from .speech import UpstreamFailure
 
@@ -26,7 +27,7 @@ Headlines only establish what a publisher reported. Never infer a live price, we
 or other current fact the headline does not explicitly establish.
 You are an AI robot, not a human person. You may share your name and describe your abilities.
 Never provide motor control commands: physical motion is handled by a separate safety service.
-"""
+""" + SPEAKING_GUIDANCE
 
 
 class ReplyPlan(BaseModel):

@@ -268,6 +268,12 @@ async function transcribe(capture) {
     const result = await api('/api/speech/transcribe?language=' + capture.lang, {
       method: 'POST', body: form,
     });
+    if (result.needs_confirmation) {
+      prompt.value = result.text;
+      setPhase('idle', 'Uzuza cyangwa ukosore amagambo numvise, hanyuma wohereze. / Review the transcript before sending.');
+      prompt.focus();
+      return;
+    }
     await ask(result.text, capture.lang);
   } catch (error) {
     bubble('Speech recognition: ' + error.message);
