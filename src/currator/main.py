@@ -20,7 +20,7 @@ from pydantic import BaseModel, StringConstraints
 from .brain import GeminiBrain, mock_reply
 from .config import HOSTED, Settings
 from .english import LocalEnglishSpeech
-from .knowledge import look_up, needs_current_info, needs_wikipedia, news_lookup
+from .knowledge import definition_during_outage, look_up, needs_current_info, needs_wikipedia, news_lookup
 from .models import (ChatRequest, ChatResponse, Language, RobotCommand, RobotResult, Source,
                      SensorTelemetry, TranscriptionResponse)
 from .rehearsal import FIXED_VOICE_REPLIES, quick_reply, rehearsal_reply
@@ -176,6 +176,15 @@ async def answer_chat(request: ChatRequest, progress=None):
         if progress is not None:
             progress(phase)
 
+    async def outage_definition():
+        if request.retrieval == "off":
+            return None
+        result = await definition_during_outage(request.text, request.language, app.state.client,
+                                                settings.wikimedia_user_agent)
+        if result:
+            intro, lang, source = result
+            return ChatResponse(reply=intro, language=lang, sources=[source], source_mode="wikipedia")
+
     report("thinking")
     language = "rw" if request.language == "auto" else request.language
     if settings.mode == "mock":
@@ -228,6 +237,9 @@ async def answer_chat(request: ChatRequest, progress=None):
         try:
             plan = await brain.plan(request.text, history, request.retrieval)
         except UpstreamFailure as exc:
+            fallback = await outage_definition()
+            if fallback:
+                return fallback
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         language = plan.language
         query = plan.query.strip() or request.text
