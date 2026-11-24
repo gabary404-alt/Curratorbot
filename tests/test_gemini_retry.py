@@ -11,7 +11,9 @@ from currator.speech import UpstreamFailure, transcribe_english_gemini
 async def test_recovers_from_a_temporary_503(operation):
     statuses = iter([503, 200])
 
-    def handler(_):
+    models = []
+    def handler(request):
+        models.append(request.url.path.split("/")[-1])
         return httpx.Response(next(statuses), json={
             "candidates": [{"content": {"parts": [{"text": "Nshuti"}]}}],
         })
@@ -24,6 +26,7 @@ async def test_recovers_from_a_temporary_503(operation):
             )
         else:
             assert await transcribe_english_gemini(b"audio", "audio/wav", settings, client) == "Nshuti"
+    assert models == ["gemini-3.5-flash-lite:generateContent", "gemini-3.1-flash-lite:generateContent"]
 
 
 @pytest.mark.asyncio

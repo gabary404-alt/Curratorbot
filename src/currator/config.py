@@ -21,7 +21,7 @@ class Settings:
     ).lower()
     gemini_api_key: str = GEMINI_KEY
     demo_password: str = DEMO_PASSWORD
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
     google_search_grounding: bool = os.getenv("GOOGLE_SEARCH_GROUNDING", "false").lower() == "true"
     vosk_model_path: str = os.getenv("VOSK_MODEL_PATH", "")
     pindo_token: str = os.getenv("PINDO_API_TOKEN", "")

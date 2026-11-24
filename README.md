@@ -47,7 +47,7 @@ Pindo's public endpoints require internet access and are rate-limited by IP. Reh
 
 Create a free-tier [Google AI Studio API key](https://aistudio.google.com/apikey), keep billing disabled, and put it in the local `.env` as `GEMINI_API_KEY`. Set `CURRATOR_MODE=live` and restart. Keep `.env` private.
 
-The default `gemini-3.1-flash-lite` supports [audio input](https://aistudio.google.com/docs/models/gemini-3.1-flash-lite) and has [free text and audio usage within quota](https://aistudio.google.com/docs/pricing#gemini-3.1-flash-lite). Google Search grounding is disabled for the demo configuration. For current questions, Currator reports when it cannot verify live information. Wikipedia and Wikidata can provide sources for general questions. Free public providers may retain or process requests under their own terms. Use rehearsed questions and avoid personal information in public demos.
+The default `gemini-3.5-flash-lite` supports [audio input](https://aistudio.google.com/docs/models/gemini-3.5-flash-lite) and has [free text and audio usage within quota](https://aistudio.google.com/docs/pricing#gemini-3.5-flash-lite). Google Search grounding is disabled for the demo configuration. For current questions, Currator reports when it cannot verify live information. Wikipedia and Wikidata can provide sources for general questions. Free public providers may retain or process requests under their own terms. Use rehearsed questions and avoid personal information in public demos.
 
 Recent news questions try GDELT and Google News RSS in parallel. Rwanda and Kigali
 headlines can also use the KT Press feed. Nshuti uses the first provider that returns

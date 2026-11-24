@@ -7,6 +7,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 RETRYABLE = {500, 502, 503, 504}
+FLASH_LITE_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
 
 
 async def generate(client: httpx.AsyncClient, url: str, *, body: dict, key: str,
@@ -25,6 +26,13 @@ async def generate(client: httpx.AsyncClient, url: str, *, body: dict, key: str,
                            operation, attempt + 1, status, type(exc).__name__)
             if attempt or not retryable:
                 raise
+            # Both supported Flash-Lite models accept our text, audio and JSON schemas.
+            # Keep custom endpoints and models on their explicitly selected provider.
+            for model, alternate in zip(FLASH_LITE_MODELS, reversed(FLASH_LITE_MODELS)):
+                if url.endswith(f"/{model}:generateContent"):
+                    url = url.removesuffix(f"{model}:generateContent") + f"{alternate}:generateContent"
+                    logger.info("Gemini %s retry model=%s", operation, alternate)
+                    break
             await asyncio.sleep(0.5)
     raise AssertionError("Gemini request exhausted without a result")
 
