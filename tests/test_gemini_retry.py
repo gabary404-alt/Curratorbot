@@ -14,6 +14,10 @@ async def test_recovers_from_a_temporary_503(operation):
     models = []
     def handler(request):
         models.append(request.url.path.split("/")[-1])
+        if models[-1] == "interactions":
+            return httpx.Response(200, json={"steps": [{"type": "model_output", "content": [
+                {"type": "text", "text": "Nshuti"},
+            ]}]})
         return httpx.Response(next(statuses), json={
             "candidates": [{"content": {"parts": [{"text": "Nshuti"}]}}],
         })
@@ -26,7 +30,7 @@ async def test_recovers_from_a_temporary_503(operation):
             )
         else:
             assert await transcribe_english_gemini(b"audio", "audio/wav", settings, client) == "Nshuti"
-    assert models == ["gemini-3.5-flash-lite:generateContent", "gemini-3.1-flash-lite:generateContent"]
+    assert models == ["gemini-3.5-flash-lite:generateContent", "interactions"]
 
 
 @pytest.mark.asyncio
