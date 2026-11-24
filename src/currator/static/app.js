@@ -133,7 +133,7 @@ function appendPlayButton(entry, label, play) {
   entry.append(button);
 }
 
-async function speak(text, lang, entry, audioUrl = null) {
+async function speak(text, lang, entry, audioUrl = null, remainder = '') {
   stopSpeech();
   if (!config.speech_output.includes(lang)) return;
   const active = {controller: new AbortController(), player: null};
@@ -152,31 +152,54 @@ async function speak(text, lang, entry, audioUrl = null) {
   };
 
   try {
+    const generate = async part => (await post('/api/speech/synthesize', {
+      text: part, language: lang,
+    }, active.controller.signal)).audio_url;
+    const nextPart = () => {
+      const chars = Array.from(remainder);
+      let end = Math.min(800, chars.length);
+      if (end < chars.length) {
+        for (let i = end - 1; i > 0; i--) {
+          if (/\s/.test(chars[i])) { end = i; break; }
+        }
+      }
+      const part = chars.slice(0, end).join('');
+      remainder = chars.slice(end).join('').trimStart();
+      return part;
+    };
     if (!audioUrl) {
       setFace('preparing');
       hint.textContent = 'Preparing my voice…';
-      const data = await post('/api/speech/synthesize', {
-        text: Array.from(text).slice(0, 800).join(''),
-        language: lang,
-      }, active.controller.signal);
+      remainder = text;
+      audioUrl = await generate(nextPart());
       if (speech !== active) return;
-      audioUrl = data.audio_url;
     }
-    if (!audioUrl) throw new Error('Nshuti’s voice is temporarily unavailable.');
-    active.player = new Audio(audioUrl);
-    active.player.onplaying = started;
-    active.player.onended = () => finish();
-    active.player.onerror = () => {
+    while (speech === active) {
+      if (!audioUrl) throw new Error('Nshuti’s voice is temporarily unavailable.');
+      active.player = new Audio(audioUrl);
+      active.player.onplaying = started;
+      active.player.onerror = () => {
+        if (speech !== active) return;
+        appendPlayButton(entry, 'Try speech again', () => void speak(text, lang, entry));
+        finish('The reply audio could not play.');
+      };
+      await active.player.play();
       if (speech !== active) return;
-      appendPlayButton(entry, 'Try speech again', () => void speak(text, lang, entry));
-      finish('The reply audio could not play.');
-    };
-    await active.player.play();
+      if (!remainder) { active.player.onended = () => finish(); return; }
+      const ended = new Promise(resolve => {
+        active.player.onended = resolve;
+        active.controller.signal.addEventListener('abort', resolve, {once: true});
+      });
+      const next = generate(nextPart()).catch(() => null);
+      await ended;
+      if (speech !== active) return;
+      audioUrl = await next;
+    }
   } catch (error) {
     if (speech !== active) return;
     if (error.name === 'NotAllowedError' && active.player) {
       appendPlayButton(entry, 'Play reply', () => {
-        void speak(text, lang, entry, audioUrl);
+        void speak(text, lang, entry, audioUrl, remainder);
       });
       finish('Tap Play reply to hear the answer.');
       return;
@@ -262,7 +285,7 @@ async function ask(text, lang) {
   try {
     const result = await requestReply({
       text, language: lang, session_id: sessionId, retrieval: $('retrieval').value, history,
-      include_audio: config.speech_output.length > 0,
+      include_audio: config.speech_output.length > 0, segmented_audio: true,
     }, updateProgress);
     progress.remove();
     if (config.mode === 'live' && !['live_unavailable', 'source_unavailable'].includes(result.source_mode)) {
@@ -286,7 +309,7 @@ async function ask(text, lang) {
       hint.textContent = result.audio_error;
       appendPlayButton(response, 'Play reply', () => void speak(result.reply, replyLang, response));
     } else if (result.audio_url) {
-      void speak(result.reply, replyLang, response, result.audio_url);
+      void speak(result.reply, replyLang, response, result.audio_url, result.remaining_speech);
     } else if (result.audio_url === undefined) {
       // Compatible with earlier servers during a rolling deployment.
       void speak(result.reply, replyLang, response);

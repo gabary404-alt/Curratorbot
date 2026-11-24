@@ -105,3 +105,40 @@ def test_greeting_skips_gemini_and_late_voice_does_not_hold_the_answer(monkeypat
     assert "Nshuti" in result["reply"]
     assert result["audio_url"] is None
     assert result["audio_error"]
+
+
+def test_segmented_voice_returns_exact_remainder(monkeypatch):
+    monkeypatch.setattr(main, "settings", Settings(mode="live", gemini_api_key="test"))
+    first = "Here is the first sentence of this longer explanation."
+    rest = "This sentence continues the explanation. " * 24
+    async def answer(*args, **kwargs):
+        return first + " " + rest, []
+    async def voice(part, *_):
+        assert part == first
+        return "intro.wav"
+    monkeypatch.setattr(main.GeminiBrain, "answer", answer)
+    monkeypatch.setattr(main, "currator_voice", voice)
+    with TestClient(main.app) as client:
+        result = client.post("/api/chat", json={
+            "text": "Explain a concept", "language": "en", "retrieval": "off",
+            "include_audio": True, "segmented_audio": True,
+        }).json()
+    assert result["audio_url"] == "intro.wav"
+    assert first + " " + result["remaining_speech"] == result["reply"]
+
+
+def test_live_capabilities_reuse_voice_in_both_languages(monkeypatch):
+    monkeypatch.setattr(main, "settings", Settings(mode="live", gemini_api_key="test"))
+    calls = []
+    async def voice(part, *_):
+        calls.append(part)
+        return "prepared.wav"
+    monkeypatch.setattr(main, "currator_voice", voice)
+    with TestClient(main.app) as client:
+        for question, lang in (("Ushobora gukora iki?", "rw"), ("What can you do?", "en")):
+            for _ in range(2):
+                result = client.post("/api/chat", json={
+                    "text": question, "language": "auto", "include_audio": True,
+                }).json()
+                assert (result["language"], result["audio_url"]) == (lang, "prepared.wav")
+    assert len(calls) == 2

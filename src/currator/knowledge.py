@@ -71,13 +71,44 @@ async def look_up(query: str, language: str, client: httpx.AsyncClient, user_age
         return "", []
     headers = {"User-Agent": user_agent}
     languages = ("rw", "en") if language == "rw" else ("en",)
-    *articles, entity = await asyncio.gather(
-        *(_bounded_lookup(_wikipedia(query, lang, client, headers)) for lang in languages),
-        _bounded_lookup(_wikidata(query, client, headers)),
-    )
-    article = next((result for result in articles if result), None)
-    evidence = [result for result in (article, entity) if result]
+    articles = [asyncio.create_task(_bounded_lookup(_wikipedia(query, lang, client, headers)))
+                for lang in languages]
+    entity = asyncio.create_task(_bounded_lookup(_wikidata(query, client, headers)))
+    try:
+        article = None
+        for task in articles:
+            article = await task
+            if article:
+                break
+        supplement = await entity if not article or entity.done() else None
+        evidence = [result for result in (article, supplement) if result]
+    finally:
+        for task in [*articles, entity]:
+            task.cancel()
+        await asyncio.gather(*articles, entity, return_exceptions=True)
     return "\n".join(extract for extract, _ in evidence), [source for _, source in evidence]
+
+
+async def definition_during_outage(text, language, client, user_agent):
+    """Use a same-language encyclopedia introduction for standalone definition requests."""
+    if needs_current_info(text):
+        return None
+    for lang, pattern in (("en", r"what (?:is|are) (.+)"), ("rw", r"(.+) ni iki")):
+        match = re.fullmatch(pattern, text.strip().strip("?!. ").casefold())
+        if not match or language not in ("auto", lang):
+            continue
+        topic = match[1].strip()
+        if len(topic.split()) > 6 or not topic:
+            return None
+        article = await _bounded_lookup(_wikipedia(topic, lang, client, {"User-Agent": user_agent}))
+        if article:
+            evidence, source = article
+            if source.label.removeprefix("Wikipedia: ").casefold() != topic:
+                return None
+            intro = evidence.partition(": ")[2].splitlines()[0]
+            sentences = re.split(r"(?<=[.!?])\s+", intro)
+            return sentences[0], lang, source
+    return None
 
 
 def needs_current_info(text: str) -> bool:

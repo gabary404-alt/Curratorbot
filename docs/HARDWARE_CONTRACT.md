@@ -33,6 +33,7 @@ ESP32 → Pi obstacle telemetry (proposed payload):
 In serial mode, the app accepts telemetry from the USB controller. Send at least five sensor
 frames per second. The app refuses movement if a valid frame is older than 1.5 seconds.
 The HTTP telemetry endpoint is for mock transport. Onboard sensors and E-stop always win.
+After a USB disconnect, the bridge requires a fresh stop acknowledgement before accepting movement again.
 
 ## Physical acceptance gates before enabling motion
 

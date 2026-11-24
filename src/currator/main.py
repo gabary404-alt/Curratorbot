@@ -20,10 +20,10 @@ from pydantic import BaseModel, StringConstraints
 from .brain import GeminiBrain, mock_reply
 from .config import HOSTED, Settings
 from .english import LocalEnglishSpeech
-from .knowledge import look_up, needs_current_info, needs_wikipedia, news_lookup
+from .knowledge import definition_during_outage, look_up, needs_current_info, needs_wikipedia, news_lookup
 from .models import (ChatRequest, ChatResponse, Language, RobotCommand, RobotResult, Source,
                      SensorTelemetry, TranscriptionResponse)
-from .rehearsal import REPLIES, quick_reply, rehearsal_reply
+from .rehearsal import FIXED_VOICE_REPLIES, quick_reply, rehearsal_reply
 from .robot import RobotBridge
 from .speech import (
     PindoSpeech, UpstreamFailure, currator_voice, transcribe_automatic, transcribe_english_gemini,
@@ -141,8 +141,7 @@ async def prepare_chat(request: ChatRequest, progress=None):
     if (not request.include_audio or not settings.gemini_api_key
             or settings.mode == "mock" or reply.language not in {"rw", "en"}):
         return reply
-    # These six fixed replies contain no visitor content and have stable pronunciations.
-    cacheable = reply.reply in {REPLIES[reply.language][intent] for intent in ("hello", "name", "thanks")}
+    cacheable = reply.reply in FIXED_VOICE_REPLIES
     if cacheable and reply.reply in app.state.greeting_audio:
         reply.audio_url = app.state.greeting_audio[reply.reply]
         return reply
@@ -153,9 +152,18 @@ async def prepare_chat(request: ChatRequest, progress=None):
         remaining = min(4.5, budget - (time.monotonic() - started)) if budget else 12
         if remaining <= 0:
             raise TimeoutError
+        spoken = reply.reply[:800]
+        if request.segmented_audio and len(reply.reply) > 320:
+            # Begin a long explanation at a natural pause while the browser queues the rest.
+            head = reply.reply[:320]
+            boundary = next((i + 1 for i, c in enumerate(head) if i >= 40 and c in ".?!"
+                             and reply.reply[i + 1].isspace()), 0)
+            spoken = head[:boundary or max(head.rfind(" "), 0) or len(head)]
         reply.audio_url = await asyncio.wait_for(
-            currator_voice(reply.reply[:800], settings, app.state.client), timeout=remaining,
+            currator_voice(spoken, settings, app.state.client), timeout=remaining,
         )
+        if request.segmented_audio:
+            reply.remaining_speech = reply.reply[len(spoken):].lstrip()
         if cacheable and reply.audio_url and len(reply.audio_url) <= 500_000:
             app.state.greeting_audio[reply.reply] = reply.audio_url
     except (TimeoutError, UpstreamFailure):
@@ -167,6 +175,15 @@ async def answer_chat(request: ChatRequest, progress=None):
     def report(phase):
         if progress is not None:
             progress(phase)
+
+    async def outage_definition():
+        if request.retrieval == "off":
+            return None
+        result = await definition_during_outage(request.text, request.language, app.state.client,
+                                                settings.wikimedia_user_agent)
+        if result:
+            intro, lang, source = result
+            return ChatResponse(reply=intro, language=lang, sources=[source], source_mode="wikipedia")
 
     report("thinking")
     language = "rw" if request.language == "auto" else request.language
@@ -220,6 +237,9 @@ async def answer_chat(request: ChatRequest, progress=None):
         try:
             plan = await brain.plan(request.text, history, request.retrieval)
         except UpstreamFailure as exc:
+            fallback = await outage_definition()
+            if fallback:
+                return fallback
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         language = plan.language
         query = plan.query.strip() or request.text
