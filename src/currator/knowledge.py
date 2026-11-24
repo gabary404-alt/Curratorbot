@@ -71,12 +71,21 @@ async def look_up(query: str, language: str, client: httpx.AsyncClient, user_age
         return "", []
     headers = {"User-Agent": user_agent}
     languages = ("rw", "en") if language == "rw" else ("en",)
-    *articles, entity = await asyncio.gather(
-        *(_bounded_lookup(_wikipedia(query, lang, client, headers)) for lang in languages),
-        _bounded_lookup(_wikidata(query, client, headers)),
-    )
-    article = next((result for result in articles if result), None)
-    evidence = [result for result in (article, entity) if result]
+    articles = [asyncio.create_task(_bounded_lookup(_wikipedia(query, lang, client, headers)))
+                for lang in languages]
+    entity = asyncio.create_task(_bounded_lookup(_wikidata(query, client, headers)))
+    try:
+        article = None
+        for task in articles:
+            article = await task
+            if article:
+                break
+        supplement = await entity if not article or entity.done() else None
+        evidence = [result for result in (article, supplement) if result]
+    finally:
+        for task in [*articles, entity]:
+            task.cancel()
+        await asyncio.gather(*articles, entity, return_exceptions=True)
     return "\n".join(extract for extract, _ in evidence), [source for _, source in evidence]
 
 

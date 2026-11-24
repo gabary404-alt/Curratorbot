@@ -29,6 +29,15 @@ INTENTS = {
            "can": ("what can you do",), "thanks": ("thank you", "thanks")},
 }
 
+LIVE_CAPABILITIES = {
+    "rw": "Twaganira mu Kinyarwanda cyangwa mu Cyongereza. Nshobora kugusobanurira ibintu no kugushakira amakuru.",
+    "en": "We can talk in English or Kinyarwanda. I can explain things, work through a question with you, or look up information.",
+}
+
+FIXED_VOICE_REPLIES = set(LIVE_CAPABILITIES.values()) | {
+    replies[intent] for replies in REPLIES.values() for intent in ("hello", "name", "thanks")
+}
+
 
 def quick_reply(text: str, language: str) -> tuple[str, Language] | None:
     """Answer standalone greetings, thanks, and introductions without a network call."""
@@ -38,11 +47,13 @@ def quick_reply(text: str, language: str) -> tuple[str, Language] | None:
             "hello": ("muraho", "muraho neza", "mwaramutse", "mwiriwe"),
             "name": ("witwa nde", "muraho witwa nde", "muraho neza witwa nde"),
             "thanks": ("urakoze", "murakoze", "murakoze cyane"),
+            "can": ("ushobora gukora iki", "ni iki ushobora gukora"),
         },
         "en": {
             "hello": ("hello", "hi", "hey"),
             "name": ("what s your name", "what is your name", "who are you"),
             "thanks": ("thanks", "thank you", "thank you very much"),
+            "can": ("what can you do", "what can you help me with"),
         },
     }
     for selected in ("rw", "en"):
@@ -50,6 +61,8 @@ def quick_reply(text: str, language: str) -> tuple[str, Language] | None:
             continue
         for intent, variants in phrases[selected].items():
             if normalized in variants:
+                if intent == "can":
+                    return LIVE_CAPABILITIES[selected], selected
                 return REPLIES[selected][intent], selected
     return None
 

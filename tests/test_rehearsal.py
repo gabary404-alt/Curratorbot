@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -145,3 +147,23 @@ def test_both_languages_use_the_same_voice(monkeypatch):
             assert response.status_code == 200
             assert response.json()["provider"] == "currator"
     assert calls == ["Muraho", "Hello"]
+
+
+@pytest.mark.asyncio
+async def test_ready_article_does_not_wait_for_secondary_source():
+    from currator.knowledge import look_up
+
+    cancelled = asyncio.Event()
+    async def handler(request):
+        if request.url.host == "www.wikidata.org":
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        return httpx.Response(200, json={"query": {"pages": {"1": {
+            "title": "Kigali", "extract": "Capital of Rwanda",
+        }}}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        _, sources = await asyncio.wait_for(look_up("Kigali", "en", client, "test"), 0.5)
+    assert sources[0].label == "Wikipedia: Kigali"
+    assert cancelled.is_set()

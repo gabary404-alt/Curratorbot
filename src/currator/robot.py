@@ -64,6 +64,7 @@ class RobotBridge:
             finally:
                 self.telemetry = Telemetry()
                 if self.port is not None:
+                    self.motion_uncertain = True
                     try:
                         self.port.close()
                     except OSError:

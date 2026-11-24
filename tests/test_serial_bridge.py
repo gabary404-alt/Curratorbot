@@ -51,3 +51,32 @@ async def test_serial_motion_requires_fresh_telemetry_and_matching_acknowledgeme
     controller.acknowledge = True
     assert (await bridge.send(RobotCommand(action="stop")))["cmd"] == "stop"
     assert not bridge.motion_uncertain
+
+
+@pytest.mark.asyncio
+async def test_usb_loss_requires_acknowledged_stop_on_reconnect(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    disconnected = asyncio.Event()
+    class LostPort:
+        def read(self, size):
+            raise OSError("USB unplugged")
+        def close(self):
+            disconnected.set()
+
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=lambda *a, **kw: LostPort()))
+    bridge = RobotBridge(Settings(enable_motion=True, robot_transport="serial"))
+    receiver = asyncio.create_task(bridge.receive_serial())
+    try:
+        await asyncio.wait_for(disconnected.wait(), 1)
+    finally:
+        receiver.cancel()
+        await asyncio.gather(receiver, return_exceptions=True)
+    assert bridge.port is None and bridge.motion_uncertain
+    bridge.port = FakeController(bridge)
+    bridge.update_telemetry(SensorTelemetry(front_cm=100, left_cm=100, right_cm=100))
+    with pytest.raises(PermissionError, match="confirmation"):
+        await bridge.send(RobotCommand(action="drive"))
+    await bridge.send(RobotCommand(action="stop"))
+    assert (await bridge.send(RobotCommand(action="drive")))["cmd"] == "drive"

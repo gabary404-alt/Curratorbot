@@ -27,7 +27,7 @@ class Settings:
     pindo_token: str = os.getenv("PINDO_API_TOKEN", "")
     pindo_media_base_url: str = os.getenv("PINDO_MEDIA_BASE_URL", "")
     wikimedia_user_agent: str = os.getenv(
-        "WIKIMEDIA_USER_AGENT", "CurratorBot/0.1 (contact: support@example.com)"
+        "WIKIMEDIA_USER_AGENT", "CurratorBot/0.1 (https://github.com/gabary404-alt/Curratorbot)"
     )
     enable_motion: bool = not HOSTED and os.getenv("ENABLE_MOTION", "false").lower() == "true"
     robot_transport: str = "mock" if HOSTED else os.getenv("ROBOT_TRANSPORT", "mock").lower()

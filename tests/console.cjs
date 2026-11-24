@@ -203,6 +203,24 @@ const value = source => vm.runInContext(source, context);
   assert.ok(element('conversation').children.some(entry => /Wabivuga nanone/.test(entry.textContent)));
   assert.equal(JSON.parse(requests.at(-1).options.body).language, 'rw');
   console.log('PASS Unclear Kinyarwanda asks for a spoken retry without filling the composer');
+
+  const tail = 'extra words '.repeat(100).trim();
+  const begin = requests.length;
+  const plays = audioPlays;
+  context.tail = tail;
+  const longReply = value("speak('Intro. ' + tail, 'en', document.createElement('div'), 'intro.wav', tail)");
+  await flush();
+  assert.equal(audioPlays, plays + 1);
+  assert.equal(requests.length, begin + 1);
+  value('speech.player.onended()');
+  await flush();
+  assert.equal(audioPlays, plays + 2);
+  value('speech.player.onended()');
+  await longReply;
+  assert.equal(audioPlays, plays + 3);
+  assert.equal(requests.slice(begin).map(r => JSON.parse(r.options.body).text).join(' '), tail);
+  value('speech.player.onended()');
+  console.log('PASS Long replies prefetch the next clip and speak the complete text in order');
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;

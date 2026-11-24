@@ -6,6 +6,7 @@ import asyncio
 import base64
 import io
 import mimetypes
+import sys
 import time
 import wave
 from pathlib import Path
@@ -110,6 +111,9 @@ async def check_sources(query: str, language: str, expected: str | None) -> None
 
 
 def main() -> int:
+    # Windows terminals can have a legacy encoding that cannot display article text.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="backslashreplace")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--language", choices=["rw", "en"], default="rw")
